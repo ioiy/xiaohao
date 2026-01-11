@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 旗舰版)
-# 版本: 2.9.0 (菜单扁平化重构、实时网速监视、日志查看)
+# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 可视化版)
+# 版本: 2.9.1 (新增: 任务自动中文翻译、菜单置顶显示)
 # GitHub: https://github.com/ioiy/xiaohao
 # =========================================================
 
@@ -32,7 +32,7 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # 当前版本
-CURRENT_VERSION="2.9.0"
+CURRENT_VERSION="2.9.1"
 
 # --- 0. 初始化与配置加载 ---
 TELEGRAM_TOKEN=""
@@ -102,14 +102,11 @@ get_system_traffic() {
 }
 
 log_traffic_usage() { 
-    # 日志格式优化：时间|流量|结果
     echo "$(date '+%Y-%m-%d %H:%M:%S')|$1" >> "$SCRIPT_LOG" 
 }
 
 get_script_monthly_usage() {
     if [ ! -f "$SCRIPT_LOG" ]; then echo "0"; return; fi
-    # 简单计算，暂不处理日期解析，假设日志都是近期的，或者用户会每月重置
-    # 为了更精准，这里依然只累加数值部分
     awk -F'|' '{sum+=$2} END {printf "%.2f", sum/1024/1024/1024}' "$SCRIPT_LOG"
 }
 
@@ -198,14 +195,12 @@ uninstall_script() {
     fi
 }
 
-# [新增] 实时网速
 live_speed() {
     if ! check_vnstat; then echo -e "${RED}请先在系统工具中安装 vnstat。${NC}"; sleep 2; return; fi
     echo -e "${GREEN}正在启动实时监视 (按 Ctrl+C 退出)...${NC}"
     vnstat -l
 }
 
-# [新增] 查看日志
 view_log() {
     echo -e "${CYAN}=== 最近 10 条运行记录 ===${NC}"
     if [ -f "$SCRIPT_LOG" ]; then
@@ -268,16 +263,39 @@ run_traffic() {
     send_telegram "Traffic Wizard: 任务完成。消耗约 $target_mb MB。"
 }
 
-# --- 4. 菜单逻辑 (重构版) ---
+# --- 4. 菜单逻辑 (任务可视化版) ---
 
 cron_menu() {
     while true; do
         clear; show_dashboard
-        echo -e "${YELLOW}=== 定时任务管理 ===${NC}"
+        echo -e "${YELLOW}=== 当前生效的定时任务 ===${NC}"
+        
+        # [新增] 核心解析逻辑
+        # 1. 获取所有包含脚本路径的任务
+        local tasks=$(crontab -l 2>/dev/null | grep "$SCRIPT_PATH")
+        
+        if [ -z "$tasks" ]; then
+            echo -e "${RED}    暂无计划任务${NC}"
+        else
+            # 2. 逐行读取并翻译
+            echo "$tasks" | while read -r line; do
+                # 提取流量MB (位于 auto 后面)
+                local mb=$(echo "$line" | grep -o 'auto [0-9]*' | awk '{print $2}')
+                
+                # 判断是随机模式还是固定模式
+                if [[ "$line" == *"sleep"* ]]; then
+                    echo -e " ${PURPLE}[随机]${NC} 每天 00:00 启动 (随机延迟执行) -> 计划跑 ${GREEN}${mb}MB${NC}"
+                else
+                    # 提取小时 (crontab 的第2列)
+                    local hour=$(echo "$line" | awk '{print $2}')
+                    echo -e " ${CYAN}[固定]${NC} 每天 ${hour}点 运行             -> 计划跑 ${GREEN}${mb}MB${NC}"
+                fi
+            done
+        fi
+        echo -e "----------------------------------------"
         echo -e "1. 添加 ${GREEN}固定时间${NC} 计划 (如每天 3点)"
         echo -e "2. 添加 ${PURPLE}随机时间${NC} 计划 (每天时间都不一样)"
         echo -e "3. 删除所有计划"
-        echo -e "4. 查看当前计划"
         echo -e "0. 返回上级"
         read -p "选择: " c_choice
         case $c_choice in
@@ -296,16 +314,11 @@ cron_menu() {
             3)
                 crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
                 echo -e "${GREEN}已删除任务。${NC}"; sleep 1 ;;
-            4)
-                echo -e "${CYAN}当前 Crontab 列表:${NC}"
-                crontab -l | grep "$SCRIPT_PATH" || echo "无任务"
-                read -p "按回车继续..." ;;
             0) return ;;
         esac
     done
 }
 
-# 新的系统工具菜单，解决选项拥挤问题
 system_tools_menu() {
     while true; do
         clear
@@ -349,7 +362,6 @@ show_dashboard() {
 main_menu() {
     while true; do
         clear; show_dashboard 
-        # 扁平化菜单设计
         echo -e " [ 1] ${GREEN}立即运行${NC} (手动)"
         echo -e " [ 2] ${YELLOW}计划任务${NC} (自动/随机)"
         echo -e "----------------------------------------"
