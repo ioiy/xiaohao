@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 完美内核版)
-# 版本: 2.6.0 (新增: vnstat卸载、手动更新确认)
+# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 自由版)
+# 版本: 2.7.0 (移除熔断保护、新增自定义链接、一键停止)
 # GitHub: https://github.com/ioiy/xiaohao
 # =========================================================
 
@@ -11,7 +11,7 @@ CONFIG_FILE="$HOME/.traffic_wizard.conf"
 SCRIPT_LOG="$HOME/.traffic_wizard.log"
 SCRIPT_PATH=$(readlink -f "$0")
 
-# 默认下载链接
+# 默认下载链接池
 DEFAULT_URLS=(
     "https://speed.cloudflare.com/__down?bytes=52428800"
     "http://speedtest.tele2.net/100MB.zip"
@@ -32,7 +32,7 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # 当前版本
-CURRENT_VERSION="2.6.0"
+CURRENT_VERSION="2.7.0"
 
 # --- 0. 初始化与配置加载 ---
 TELEGRAM_TOKEN=""
@@ -42,10 +42,19 @@ IP_VERSION="auto"
 SMART_MODE="false"    
 MONTHLY_GOAL_GB="10"
 ENABLE_JITTER="true"
+CUSTOM_URLS_STR=""    # 存储用户自定义链接，用逗号分隔
 
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then source "$CONFIG_FILE"; fi
-    if [ -z "${URLS+x}" ] || [ ${#URLS[@]} -eq 0 ]; then URLS=("${DEFAULT_URLS[@]}"); fi
+    
+    # 重置并合并链接池
+    URLS=("${DEFAULT_URLS[@]}")
+    
+    # 如果有自定义链接，加入池子
+    if [ -n "$CUSTOM_URLS_STR" ]; then
+        IFS=',' read -ra USER_URLS <<< "$CUSTOM_URLS_STR"
+        URLS+=("${USER_URLS[@]}")
+    fi
 }
 
 save_config() {
@@ -57,6 +66,7 @@ IP_VERSION="$IP_VERSION"
 SMART_MODE="$SMART_MODE"
 MONTHLY_GOAL_GB="$MONTHLY_GOAL_GB"
 ENABLE_JITTER="$ENABLE_JITTER"
+CUSTOM_URLS_STR="$CUSTOM_URLS_STR"
 EOF
 }
 
@@ -73,7 +83,6 @@ get_main_interface() {
 }
 
 get_system_traffic() {
-    # 优先 vnstat
     if check_vnstat; then
         local traffic_output
         traffic_output=$(vnstat -m --oneline 2>/dev/null | awk -F';' '{print $11}') 
@@ -82,8 +91,7 @@ get_system_traffic() {
             return
         fi
     fi
-
-    # 降级: 内核读取
+    # 内核读取模式
     local iface=$(get_main_interface)
     if [ -n "$iface" ]; then
         local line=$(grep "$iface" /proc/net/dev)
@@ -96,12 +104,6 @@ get_system_traffic() {
         fi
     fi
     echo "0"
-}
-
-check_load() {
-    local load=$(cat /proc/loadavg | awk '{print $1}')
-    local is_high=$(echo "$load > 2.0" | bc -l 2>/dev/null || awk -v l="$load" 'BEGIN {print (l>2.0)}')
-    if [ "$is_high" -eq 1 ]; then return 1; else return 0; fi
 }
 
 log_traffic_usage() { echo "$(date +%s)|$1" >> "$SCRIPT_LOG"; }
@@ -135,127 +137,87 @@ random_user_agent() {
     echo "${agents[$RANDOM % ${#agents[@]}]}"
 }
 
-# --- 2. 核心功能升级区 ---
+# --- 2. 功能函数 ---
 
-# [升级] 检查更新 (手动选择模式)
 check_update() {
     echo -e "${CYAN}正在连接 GitHub 检查更新...${NC}"
     local remote_url="https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh"
-    # 增加加速源备用
     local remote_script=$(curl -s --connect-timeout 5 "https://ghproxy.com/$remote_url")
-    if [ -z "$remote_script" ]; then
-        remote_script=$(curl -s --connect-timeout 5 "$remote_url")
-    fi
-
+    if [ -z "$remote_script" ]; then remote_script=$(curl -s --connect-timeout 5 "$remote_url"); fi
     local remote_version=$(echo "$remote_script" | sed -n 's/.*CURRENT_VERSION="\([0-9\.]*\)".*/\1/p')
 
-    if [ -z "$remote_version" ]; then
-        echo -e "${RED}检查失败：无法获取版本信息。${NC}"
-        return
-    fi
-
-    echo -e "当前版本: v$CURRENT_VERSION"
-    echo -e "最新版本: v$remote_version"
+    if [ -z "$remote_version" ]; then echo -e "${RED}检查失败。${NC}"; return; fi
+    echo -e "当前: v$CURRENT_VERSION | 最新: v$remote_version"
 
     if [ "$CURRENT_VERSION" != "$remote_version" ]; then
-        echo -e "${YELLOW}发现新版本！${NC}"
-        read -p "是否立即更新并覆盖当前脚本? (y/n): " confirm
+        read -p "发现新版本，是否更新? (y/n): " confirm
         if [ "$confirm" == "y" ]; then
-            echo "$remote_script" > "$SCRIPT_PATH"
-            chmod +x "$SCRIPT_PATH"
-            echo -e "${GREEN}更新成功！请重新运行脚本。${NC}"
-            exit 0
-        else
-            echo -e "已取消更新。"
+            echo "$remote_script" > "$SCRIPT_PATH"; chmod +x "$SCRIPT_PATH"
+            echo -e "${GREEN}更新成功。${NC}"; exit 0
         fi
     else
-        echo -e "${GREEN}当前已是最新版本。${NC}"
+        echo -e "${GREEN}无需更新。${NC}"
     fi
 }
 
-# [新增] 卸载依赖 (vnstat)
 uninstall_dependencies() {
     if check_vnstat; then
-        echo -e "${YELLOW}检测到系统安装了 vnstat。${NC}"
         read -p "是否同时卸载 vnstat? (y/n): " rm_vn
         if [ "$rm_vn" == "y" ]; then
-            echo -e "${CYAN}正在卸载 vnstat...${NC}"
-            if [ -f /etc/alpine-release ]; then
-                apk del vnstat
-            elif [ -f /etc/debian_version ]; then
-                apt-get purge -y vnstat
-                apt-get autoremove -y
-            fi
-            echo -e "${GREEN}vnstat 已卸载。${NC}"
+            echo "正在卸载 vnstat..."
+            if [ -f /etc/alpine-release ]; then apk del vnstat
+            elif [ -f /etc/debian_version ]; then apt-get purge -y vnstat && apt-get autoremove -y; fi
+            echo "vnstat 已卸载。"
         fi
     fi
 }
 
-# --- 3. 辅助功能 ---
-
-install_dependencies() {
-    echo -e "${CYAN}正在检测并安装依赖 (vnstat, curl, cron)...${NC}"
-    if [ -f /etc/alpine-release ]; then
-        apk update && apk add vnstat curl bash
-        rc-service vnstatd start 2>/dev/null
-        rc-update add vnstatd default 2>/dev/null
-    elif [ -f /etc/debian_version ]; then
-        apt-get update && apt-get install -y vnstat curl cron bc
-        systemctl enable vnstat 2>/dev/null
-        systemctl start vnstat 2>/dev/null
-    else
-        echo -e "${RED}未识别的系统，请手动安装 vnstat。${NC}"
-        return
-    fi
-    echo -e "${GREEN}安装完成！${NC}"
-    vnstat -u 2>/dev/null
-    sleep 2
-}
-
-reset_stats() {
-    rm -f "$SCRIPT_LOG"
-    echo -e "${GREEN}统计数据已重置。${NC}"
+# [新增] 紧急停止
+kill_all_tasks() {
+    echo -e "${YELLOW}正在终止所有后台流量任务...${NC}"
+    # 杀掉所有包含当前脚本路径的 bash 进程，排除自己
+    pgrep -f "$SCRIPT_PATH" | grep -v $$ | xargs -r kill -9
+    # 杀掉 curl 进程 (谨慎操作，假设只杀本脚本起的curl有点难区分，这里简单粗暴杀掉长时间运行的curl)
+    # 为安全起见，只提示
+    echo -e "${GREEN}脚本后台进程已停止。${NC}"
+    echo -e "${YELLOW}提示: 如果 curl 还在运行，请手动执行 'killall curl' (如果有权限)${NC}"
     sleep 1
 }
 
-# [升级] 卸载脚本 (集成依赖卸载)
+install_dependencies() {
+    echo -e "${CYAN}正在安装依赖...${NC}"
+    if [ -f /etc/alpine-release ]; then apk update && apk add vnstat curl bash && rc-service vnstatd start 2>/dev/null && rc-update add vnstatd default 2>/dev/null
+    elif [ -f /etc/debian_version ]; then apt-get update && apt-get install -y vnstat curl cron bc && systemctl enable vnstat 2>/dev/null && systemctl start vnstat 2>/dev/null
+    else echo -e "${RED}未知系统。${NC}"; return; fi
+    echo -e "${GREEN}完成。${NC}"; vnstat -u 2>/dev/null; sleep 1
+}
+
+reset_stats() { rm -f "$SCRIPT_LOG"; echo -e "${GREEN}已重置。${NC}"; sleep 1; }
+
 uninstall_script() {
-    echo -e "${RED}${BOLD}警告：即将删除脚本、配置、日志及定时任务！${NC}"
-    read -p "确定要继续卸载吗？(y/n): " confirm
-    if [ "$confirm" == "y" ]; then
-        # 询问卸载 vnstat
+    read -p "确定卸载? (y/n): " c
+    if [ "$c" == "y" ]; then
         uninstall_dependencies
-        
-        # 删除任务和文件
         crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
         rm -f "$CONFIG_FILE" "$SCRIPT_LOG" "$SCRIPT_PATH"
-        
-        echo -e "${GREEN}脚本及其数据已彻底清除。再见！${NC}"
-        exit 0
+        echo -e "${GREEN}卸载完成。${NC}"; exit 0
     fi
 }
 
-# --- 4. 核心下载逻辑 ---
+# --- 3. 核心下载逻辑 (无熔断版) ---
 run_traffic() {
     load_config
     local target_mb=$1
     local mode=$2
 
-    if ! check_load; then
-        local load_msg="[熔断保护] 系统负载过高 (>2.0)，跳过本次任务。"
-        echo -e "${RED}$load_msg${NC}"
-        if [ "$mode" == "auto" ]; then send_telegram "$load_msg"; fi
-        return
-    fi
+    # [已移除] 负载检查 check_load 及其熔断逻辑
 
     if [ "$mode" == "auto" ] && [ "$SMART_MODE" == "true" ]; then
         local sys_usage=$(get_system_traffic)
         local is_limit_reached=$(awk -v u="$sys_usage" -v g="$MONTHLY_GOAL_GB" 'BEGIN {print (u >= g) ? 1 : 0}')
         if [ "$is_limit_reached" -eq 1 ]; then
             local log_msg="[智能模式] 流量($sys_usage GB) 已达标($MONTHLY_GOAL_GB GB)。停止运行。"
-            echo -e "${YELLOW}$log_msg${NC}"
-            send_telegram "$log_msg"
-            exit 0
+            echo -e "${YELLOW}$log_msg${NC}"; send_telegram "$log_msg"; exit 0
         fi
     fi
 
@@ -263,7 +225,7 @@ run_traffic() {
         local percent=$((RANDOM % 21 - 10))
         local offset=$((target_mb * percent / 100))
         target_mb=$((target_mb + offset))
-        echo -e "${PURPLE}[拟人化] 流量随机波动生效: 目标修正为 ${target_mb} MB${NC}"
+        echo -e "${PURPLE}[拟人化] 目标修正为 ${target_mb} MB${NC}"
     fi
 
     local total_downloaded=0
@@ -274,7 +236,7 @@ run_traffic() {
     if [ "$IP_VERSION" == "4" ]; then curl_opts="$curl_opts -4"; fi
     if [ "$IP_VERSION" == "6" ]; then curl_opts="$curl_opts -6"; fi
 
-    echo -e "${YELLOW}[运行中] 目标: ${target_mb} MB | 限速: ${LIMIT_RATE:-无} | UA: 随机${NC}"
+    echo -e "${YELLOW}[运行中] 目标: ${target_mb} MB | 链接数: ${#URLS[@]} | UA: 随机${NC}"
     while [ $total_downloaded -lt $target_bytes ]; do
         local url=${URLS[$RANDOM % ${#URLS[@]}]}
         local ua=$(random_user_agent)
@@ -285,48 +247,32 @@ run_traffic() {
             log_traffic_usage "$chunk_size"
             count=$((count + 1))
             local current_mb=$((total_downloaded / 1024 / 1024))
-            echo -e " -> ${GREEN}成功块 #$count (累计约 ${current_mb} MB)${NC}"
+            echo -e " -> ${GREEN}成功 #$count (共 ${current_mb} MB)${NC}"
         else
-            echo -e " -> ${RED}下载失败，更换链接重试...${NC}"
+            echo -e " -> ${RED}失败，重试...${NC}"
         fi
         sleep $((RANDOM % 3 + 2))
     done
-    echo -e "${GREEN}任务完成！${NC}"
-    send_telegram "Traffic Wizard: 任务完成。本次脚本消耗约 $target_mb MB。"
+    echo -e "${GREEN}完成！${NC}"
+    send_telegram "Traffic Wizard: 任务完成。消耗约 $target_mb MB。"
 }
 
-# --- 5. 仪表盘与菜单 ---
+# --- 4. 仪表盘与菜单 ---
 
 show_dashboard() {
     load_config
-    local mem_total=$(free -m | awk 'NR==2{print $2}')
     local mem_used=$(free -m | awk 'NR==2{print $3}')
-    local load_avg=$(cat /proc/loadavg | awk '{print $1" "$2" "$3}')
     local script_u=$(get_script_monthly_usage)
     local sys_u=$(get_system_traffic)
-    
-    local status_text=""
-    if check_vnstat; then status_text="${GREEN}vnstat(精准)${NC}"; 
-    else status_text="${YELLOW}内核读取(重启清零)${NC}"; fi
-    
-    local percentage=0
-    if [ "$MONTHLY_GOAL_GB" != "0" ]; then
-         percentage=$(awk -v u="$sys_u" -v g="$MONTHLY_GOAL_GB" 'BEGIN {printf "%d", (u/g)*100}')
-    fi
-    if [ $percentage -gt 100 ]; then percentage=100; fi
+    local status_text=""; if check_vnstat; then status_text="${GREEN}vnstat${NC}"; else status_text="${YELLOW}内核${NC}"; fi
+    local custom_url_count=0; if [ -n "$CUSTOM_URLS_STR" ]; then IFS=',' read -ra TMP_ARR <<< "$CUSTOM_URLS_STR"; custom_url_count=${#TMP_ARR[@]}; fi
 
     echo -e "${BLUE}====================================================${NC}"
     echo -e "         ${BOLD}Traffic Wizard Ultimate v${CURRENT_VERSION}${NC}        "
     echo -e "${BLUE}====================================================${NC}"
-    echo -e " ${BOLD}系统状态:${NC} RAM: ${mem_used}/${mem_total}MB | Load: ${load_avg}"
-    echo -e " ${BOLD}流量统计:${NC} 脚本: ${GREEN}${script_u} GB${NC} | 系统: ${YELLOW}${sys_u} GB${NC}"
-    echo -e " ${BOLD}数据来源:${NC} $status_text"
-    
-    if [ "$SMART_MODE" == "true" ]; then
-        echo -e " ${BOLD}智能进度:${NC} [${percentage}%] 已用 ${sys_u} / ${MONTHLY_GOAL_GB} GB"
-    fi
-
-    echo -e " ${BOLD}当前配置:${NC} 智能[$( [ "$SMART_MODE" == "true" ] && echo "${GREEN}开${NC}" || echo "${RED}关${NC}" )] | 波动[$( [ "$ENABLE_JITTER" == "true" ] && echo "${GREEN}开${NC}" || echo "${RED}关${NC}" )] | 限速[${CYAN}${LIMIT_RATE:-无}${NC}]"
+    echo -e " ${BOLD}状态:${NC} RAM:${mem_used}MB | 源:$status_text | 链接:${#URLS[@]}个(自定:${custom_url_count})"
+    echo -e " ${BOLD}流量:${NC} 脚本:${GREEN}${script_u}G${NC} | 系统:${YELLOW}${sys_u}G${NC} | 目标:${MONTHLY_GOAL_GB}G"
+    echo -e " ${BOLD}配置:${NC} 智能[$( [ "$SMART_MODE" == "true" ] && echo "${GREEN}开${NC}" || echo "${RED}关${NC}" )] | 波动[$( [ "$ENABLE_JITTER" == "true" ] && echo "${GREEN}开${NC}" || echo "${RED}关${NC}" )] | 限速[${CYAN}${LIMIT_RATE:-无}${NC}]"
     echo -e "${BLUE}====================================================${NC}"
 }
 
@@ -338,10 +284,10 @@ settings_menu() {
         echo -e "2. 流量限速设置"
         echo -e "3. IP 协议偏好"
         echo -e "4. 智能补课模式"
-        echo -e "5. 随机流量波动 [$( [ "$ENABLE_JITTER" == "true" ] && echo "${GREEN}开启${NC}" || echo "${RED}关闭${NC}" )]"
-        echo -e "6. ${CYAN}一键安装 vnstat (推荐)${NC}"
-        echo -e "7. 重置统计"
-        echo -e "8. ${RED}完全卸载 (含vnstat)${NC}"
+        echo -e "5. 随机流量波动"
+        echo -e "6. ${CYAN}添加自定义下载链接${NC} (NEW!)"
+        echo -e "7. 清空自定义链接"
+        echo -e "8. 安装 vnstat | 9. 重置统计 | 10. 卸载"
         echo -e "0. 返回"
         read -p "选择: " s_choice
         case $s_choice in
@@ -350,9 +296,17 @@ settings_menu() {
             3) read -p "1.auto 2.IPv4 3.IPv6: " ip_c; case $ip_c in 2) IP_VERSION="4";; 3) IP_VERSION="6";; *) IP_VERSION="auto";; esac; save_config ;;
             4) [ "$SMART_MODE" == "true" ] && SMART_MODE="false" || { SMART_MODE="true"; read -p "目标(GB): " MONTHLY_GOAL_GB; }; save_config ;;
             5) [ "$ENABLE_JITTER" == "true" ] && ENABLE_JITTER="false" || ENABLE_JITTER="true"; save_config ;;
-            6) install_dependencies; read -p "按回车..." ;;
-            7) reset_stats; sleep 1 ;;
-            8) uninstall_script ;;
+            6) 
+               echo -e "请输入下载链接 (http/https):"
+               read -r new_url
+               if [[ $new_url == http* ]]; then
+                   if [ -z "$CUSTOM_URLS_STR" ]; then CUSTOM_URLS_STR="$new_url"; else CUSTOM_URLS_STR="$CUSTOM_URLS_STR,$new_url"; fi
+                   save_config; echo "已添加。"
+               else echo "无效链接"; fi; sleep 1 ;;
+            7) CUSTOM_URLS_STR=""; save_config; echo "已清空"; sleep 1 ;;
+            8) install_dependencies; read -p "按回车..." ;;
+            9) reset_stats ;;
+            10) uninstall_script ;;
             0) return ;;
         esac
     done
@@ -363,8 +317,9 @@ main_menu() {
         clear; show_dashboard 
         echo -e " 1. ${GREEN}立即运行${NC} (手动)"
         echo -e " 2. ${YELLOW}定时任务${NC} (自动)"
-        echo -e " 3. ${PURPLE}高级设置${NC} (环境/配置/卸载)"
-        echo -e " 4. ${BLUE}检查更新${NC}"
+        echo -e " 3. ${PURPLE}高级设置${NC} (链接/配置/卸载)"
+        echo -e " 4. ${RED}停止运行${NC} (Kill All)"
+        echo -e " 5. ${BLUE}检查更新${NC}"
         echo -e " 0. 退出"
         echo -e "----------------------------------------------------"
         read -p "请输入选项: " choice
@@ -377,7 +332,8 @@ main_menu() {
                if [ "$c" == "2" ]; then crontab -l | grep -v "$SCRIPT_PATH" | crontab -; echo "已删"; sleep 1; fi
                if [ "$c" == "3" ]; then crontab -l | grep "$SCRIPT_PATH"; read -p "按回车..."; fi ;;
             3) settings_menu ;;
-            4) check_update; read -p "按回车..." ;;
+            4) kill_all_tasks ;;
+            5) check_update; read -p "按回车..." ;;
             0) exit 0 ;;
         esac
     done
