@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 仪表盘版)
-# 版本: 2.3.0 (新增首页仪表盘、系统监控、一键卸载)
+# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 全能版)
+# 版本: 2.4.0 (新增: 随机流量波动、高负载熔断、环境修复)
 # =========================================================
 
 # --- 全局配置 ---
@@ -31,7 +31,7 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # 当前版本
-CURRENT_VERSION="2.3.0"
+CURRENT_VERSION="2.4.0"
 
 # --- 0. 初始化与配置加载 ---
 TELEGRAM_TOKEN=""
@@ -39,7 +39,8 @@ TELEGRAM_CHAT_ID=""
 LIMIT_RATE="0"        
 IP_VERSION="auto"     
 SMART_MODE="false"    
-MONTHLY_GOAL_GB="10" 
+MONTHLY_GOAL_GB="10"
+ENABLE_JITTER="true"  # 开启随机波动
 
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then source "$CONFIG_FILE"; fi
@@ -54,12 +55,27 @@ LIMIT_RATE="$LIMIT_RATE"
 IP_VERSION="$IP_VERSION"
 SMART_MODE="$SMART_MODE"
 MONTHLY_GOAL_GB="$MONTHLY_GOAL_GB"
+ENABLE_JITTER="$ENABLE_JITTER"
 EOF
 }
 
 # --- 1. 核心工具函数 ---
 
 check_vnstat() { if ! command -v vnstat &> /dev/null; then return 1; else return 0; fi; }
+
+# [新增] 检查系统负载
+check_load() {
+    # 获取 1分钟负载
+    local load=$(cat /proc/loadavg | awk '{print $1}')
+    # 简单的浮点比较，如果负载 > 1.5 且 CPU核数少，则危险
+    # 这里设定阈值为 2.0 (对于单核机器来说已经很卡了)
+    local is_high=$(echo "$load > 2.0" | bc -l 2>/dev/null || awk -v l="$load" 'BEGIN {print (l>2.0)}')
+    if [ "$is_high" -eq 1 ]; then
+        return 1 # 负载过高
+    else
+        return 0 # 正常
+    fi
+}
 
 get_system_monthly_traffic() {
     if check_vnstat; then
@@ -104,31 +120,42 @@ random_user_agent() {
 
 # --- 2. 功能函数 ---
 
-# 清理日志
-reset_stats() {
-    echo -e "${YELLOW}确定要清空流量统计历史吗？(y/n)${NC}"
-    read -r confirm
-    if [ "$confirm" == "y" ]; then
-        rm -f "$SCRIPT_LOG"
-        echo -e "${GREEN}统计数据已重置。${NC}"
+# [新增] 一键环境修复
+install_dependencies() {
+    echo -e "${CYAN}正在检测并安装依赖 (vnstat, curl, cron)...${NC}"
+    if [ -f /etc/alpine-release ]; then
+        apk update && apk add vnstat curl bash
+        rc-service vnstatd start 2>/dev/null
+        rc-update add vnstatd default 2>/dev/null
+    elif [ -f /etc/debian_version ]; then
+        apt-get update && apt-get install -y vnstat curl cron bc
+        systemctl enable vnstat 2>/dev/null
+        systemctl start vnstat 2>/dev/null
     else
-        echo "已取消。"
+        echo -e "${RED}未识别的系统，请手动安装 vnstat 和 curl。${NC}"
+        read -p "按回车继续..."
+        return
     fi
+    echo -e "${GREEN}依赖安装尝试完成！${NC}"
+    # 强制刷新一下 vnstat 数据库
+    vnstat -u 2>/dev/null
+    sleep 2
 }
 
-# 卸载脚本
+reset_stats() {
+    rm -f "$SCRIPT_LOG"
+    echo -e "${GREEN}统计数据已重置。${NC}"
+    sleep 1
+}
+
 uninstall_script() {
-    echo -e "${RED}${BOLD}警告：这将删除脚本、配置文件、日志以及定时任务！${NC}"
-    read -p "确定卸载吗？(y/n): " confirm
+    echo -e "${RED}${BOLD}警告：即将删除所有文件和任务！${NC}"
+    read -p "确定吗？(y/n): " confirm
     if [ "$confirm" == "y" ]; then
-        # 删除定时任务
         crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
-        # 删除文件
         rm -f "$CONFIG_FILE" "$SCRIPT_LOG" "$SCRIPT_PATH"
-        echo -e "${GREEN}卸载完成，再见！${NC}"
+        echo -e "${GREEN}已卸载。${NC}"
         exit 0
-    else
-        echo "已取消。"
     fi
 }
 
@@ -138,6 +165,15 @@ run_traffic() {
     local target_mb=$1
     local mode=$2
 
+    # [新增] 熔断保护
+    if ! check_load; then
+        local load_msg="[熔断保护] 系统负载过高 (>2.0)，本次任务强制跳过，防止宕机。"
+        echo -e "${RED}$load_msg${NC}"
+        if [ "$mode" == "auto" ]; then send_telegram "$load_msg"; fi
+        return
+    fi
+
+    # 智能模式检查
     if [ "$mode" == "auto" ] && [ "$SMART_MODE" == "true" ]; then
         if check_vnstat; then
             local sys_usage=$(get_system_monthly_traffic)
@@ -149,6 +185,17 @@ run_traffic() {
                 exit 0
             fi
         fi
+    fi
+
+    # [新增] 流量随机波动 (Jitter)
+    # 如果开启，实际跑的流量会在 目标值的 90% ~ 110% 之间浮动
+    if [ "$ENABLE_JITTER" == "true" ]; then
+        # 生成 -10 到 10 之间的随机数
+        local percent=$((RANDOM % 21 - 10))
+        # 计算偏移量: target * percent / 100
+        local offset=$((target_mb * percent / 100))
+        target_mb=$((target_mb + offset))
+        echo -e "${PURPLE}[拟人化] 流量随机波动生效: 目标修正为 ${target_mb} MB${NC}"
     fi
 
     local total_downloaded=0
@@ -184,20 +231,17 @@ run_traffic() {
 
 show_dashboard() {
     load_config
-    # 获取系统信息
     local mem_total=$(free -m | awk 'NR==2{print $2}')
     local mem_used=$(free -m | awk 'NR==2{print $3}')
+    local load_avg=$(cat /proc/loadavg | awk '{print $1" "$2" "$3}')
     local disk_used=$(df -h / | awk 'NR==2{print $5}')
     local uptime_day=$(uptime -p | sed 's/up //')
-    
-    # 获取流量信息
     local script_u=$(get_script_monthly_usage)
     local sys_u=$(get_system_monthly_traffic)
     local vnstat_status=""
     
     if check_vnstat; then 
         vnstat_status="${GREEN}运行中${NC}"
-        # 计算进度条 (简单的视觉效果)
         local percentage=0
         if [ "$MONTHLY_GOAL_GB" != "0" ]; then
              percentage=$(awk -v u="$sys_u" -v g="$MONTHLY_GOAL_GB" 'BEGIN {printf "%d", (u/g)*100}')
@@ -209,18 +253,18 @@ show_dashboard() {
         percentage=0
     fi
 
-    # 渲染界面
     echo -e "${BLUE}====================================================${NC}"
     echo -e "         ${BOLD}Traffic Wizard Ultimate v${CURRENT_VERSION}${NC}        "
     echo -e "${BLUE}====================================================${NC}"
-    echo -e " ${BOLD}系统状态:${NC} 内存: ${mem_used}/${mem_total}MB | 硬盘: ${disk_used} | 运行: ${uptime_day}"
-    echo -e " ${BOLD}流量统计:${NC} 本月脚本: ${GREEN}${script_u} GB${NC} | 系统总计: ${YELLOW}${sys_u} GB${NC} (vnstat: $vnstat_status)"
+    echo -e " ${BOLD}系统状态:${NC} RAM: ${mem_used}/${mem_total}MB | Load: ${load_avg}"
+    echo -e " ${BOLD}流量统计:${NC} 脚本: ${GREEN}${script_u} GB${NC} | 系统: ${YELLOW}${sys_u} GB${NC} (${vnstat_status})"
     
     if [ "$SMART_MODE" == "true" ]; then
-        echo -e " ${BOLD}智能目标:${NC} [${percentage}%] 已用 ${sys_u} / ${MONTHLY_GOAL_GB} GB"
+        echo -e " ${BOLD}智能进度:${NC} [${percentage}%] 已用 ${sys_u} / ${MONTHLY_GOAL_GB} GB"
     fi
 
-    echo -e " ${BOLD}当前配置:${NC} 智能模式[$( [ "$SMART_MODE" == "true" ] && echo "${GREEN}开${NC}" || echo "${RED}关${NC}" )] | 限速[${CYAN}${LIMIT_RATE:-无}${NC}] | TG[$( [ -n "$TELEGRAM_TOKEN" ] && echo "${GREEN}开${NC}" || echo "${RED}关${NC}" )]"
+    # 状态栏显示是否开启了波动
+    echo -e " ${BOLD}当前配置:${NC} 智能[$( [ "$SMART_MODE" == "true" ] && echo "${GREEN}开${NC}" || echo "${RED}关${NC}" )] | 波动[$( [ "$ENABLE_JITTER" == "true" ] && echo "${GREEN}开${NC}" || echo "${RED}关${NC}" )] | 限速[${CYAN}${LIMIT_RATE:-无}${NC}]"
     echo -e "${BLUE}====================================================${NC}"
 }
 
@@ -231,19 +275,22 @@ settings_menu() {
         echo -e "1. 配置 Telegram Bot"
         echo -e "2. 流量限速设置"
         echo -e "3. IP 协议偏好"
-        echo -e "4. 智能补课模式开关"
-        echo -e "5. 重置脚本流量统计"
-        echo -e "6. ${RED}一键卸载脚本${NC}"
-        echo -e "0. 返回主菜单"
+        echo -e "4. 智能补课模式"
+        echo -e "5. 随机流量波动 [$( [ "$ENABLE_JITTER" == "true" ] && echo "${GREEN}开启${NC}" || echo "${RED}关闭${NC}" )]"
+        echo -e "6. ${CYAN}一键修复运行环境 (vnstat/cron)${NC}"
+        echo -e "7. 重置统计 / 8. 卸载"
+        echo -e "0. 返回"
         read -p "选择: " s_choice
         case $s_choice in
             1) read -p "Token: " TELEGRAM_TOKEN; read -p "ChatID: " TELEGRAM_CHAT_ID; save_config ;;
             2) read -p "限速 (如 2M, 500k, 0关): " LIMIT_RATE; save_config ;;
             3) read -p "1.auto 2.IPv4 3.IPv6: " ip_c; case $ip_c in 2) IP_VERSION="4";; 3) IP_VERSION="6";; *) IP_VERSION="auto";; esac; save_config ;;
-            4) if ! check_vnstat; then echo "请装 vnstat"; sleep 1; else
+            4) if ! check_vnstat; then echo "请先执行选项 6 修复环境"; sleep 1; else
                [ "$SMART_MODE" == "true" ] && SMART_MODE="false" || { SMART_MODE="true"; read -p "目标(GB): " MONTHLY_GOAL_GB; }; save_config; fi ;;
-            5) reset_stats; sleep 1 ;;
-            6) uninstall_script ;;
+            5) [ "$ENABLE_JITTER" == "true" ] && ENABLE_JITTER="false" || ENABLE_JITTER="true"; save_config ;;
+            6) install_dependencies; read -p "按回车..." ;;
+            7) reset_stats; sleep 1 ;;
+            8) uninstall_script ;;
             0) return ;;
         esac
     done
@@ -252,10 +299,10 @@ settings_menu() {
 main_menu() {
     while true; do
         clear
-        show_dashboard # 每次回到菜单都刷新抬头数据
-        echo -e " 1. ${GREEN}立即运行${NC} (手动跑流量)"
-        echo -e " 2. ${YELLOW}定时任务${NC} (自动保号)"
-        echo -e " 3. ${PURPLE}高级设置${NC} (配置/清理/卸载)"
+        show_dashboard 
+        echo -e " 1. ${GREEN}立即运行${NC} (手动)"
+        echo -e " 2. ${YELLOW}定时任务${NC} (自动)"
+        echo -e " 3. ${PURPLE}高级设置${NC} (环境/配置/卸载)"
         echo -e " 4. ${BLUE}版本检测${NC}"
         echo -e " 0. 退出"
         echo -e "----------------------------------------------------"
@@ -263,13 +310,13 @@ main_menu() {
         case $choice in
             1) read -p "输入流量(MB): " mb; run_traffic "$mb" "manual"; read -p "按回车..." ;;
             2) 
-               echo "1.添加计划 2.删除计划 3.查看"; read -p "选: " c
+               echo "1.添加 2.删除 3.查看"; read -p "选: " c
                if [ "$c" == "1" ]; then read -p "MB: " m; read -p "StartHour: " h; 
                   (crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH"; echo "0 $h * * * /bin/bash $SCRIPT_PATH auto $m >> /dev/null 2>&1") | crontab -; echo "已加"; sleep 1; fi
                if [ "$c" == "2" ]; then crontab -l | grep -v "$SCRIPT_PATH" | crontab -; echo "已删"; sleep 1; fi
                if [ "$c" == "3" ]; then crontab -l | grep "$SCRIPT_PATH"; read -p "按回车..."; fi ;;
             3) settings_menu ;;
-            4) echo "当前版本 v$CURRENT_VERSION (定制版)"; read -p "按回车..." ;;
+            4) echo "当前版本 v$CURRENT_VERSION (全能守护版)"; read -p "按回车..." ;;
             0) exit 0 ;;
         esac
     done
