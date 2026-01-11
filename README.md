@@ -30,4 +30,4 @@
 推荐使用 `root` 用户运行：
 
 ```bash
-curl -sS -O [https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh](https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh) && chmod +x xiaohao.sh && ./xiaohao.sh
+curl -sS -O https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh && chmod +x xiaohao.sh && ./xiaohao.sh
