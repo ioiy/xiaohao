@@ -40,8 +40,8 @@ check_update() {
     # 获取 GitHub 上的脚本内容
     REMOTE_SCRIPT=$(curl -s https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh)
     
-    # 使用 awk 提取版本号
-    REMOTE_VERSION=$(echo "$REMOTE_SCRIPT" | awk -F'=' '/CURRENT_VERSION/ {print $2}' | tr -d '"')
+    # 使用 sed 提取版本号
+    REMOTE_VERSION=$(echo "$REMOTE_SCRIPT" | sed -n 's/.*CURRENT_VERSION="\([0-9\.]*\)".*/\1/p')
 
     if [ -z "$REMOTE_VERSION" ]; then
         echo -e "${RED}无法从 GitHub 获取最新版本号！${NC}"
