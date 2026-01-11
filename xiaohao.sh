@@ -1,25 +1,27 @@
 #!/bin/bash
 
 # =========================================================
-# 脚本名称: Traffic Wizard Pro (流量消耗交互脚本 - 增强版)
+# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 终极版)
 # 适用环境: Alpine, Debian, Ubuntu (256M内存 NAT VPS)
-# 功能: 交互式菜单、后台静默运行、定时任务管理、全配置面板
+# 功能: 智能补课、限速、IPv4/6切换、流量统计、TG通知
 # =========================================================
 
 # 当前脚本版本
-CURRENT_VERSION="1.2.0"
+CURRENT_VERSION="2.0.0"
 
-# --- 全局配置 ---
-# 配置文件路径 (配置与脚本分离，确保更新脚本不丢配置)
+# --- 全局配置与文件路径 ---
 CONFIG_FILE="$HOME/.traffic_wizard.conf"
-LOG_FILE="/tmp/traffic_usage.log"
+SCRIPT_LOG="$HOME/.traffic_wizard.log"  # 记录脚本累计跑了多少
+SCRIPT_PATH=$(readlink -f "$0")
 
-# 默认下载链接 (如果配置文件没有定义自定义链接，则使用这些)
+# 默认下载链接 (大文件)
 DEFAULT_URLS=(
-    "https://speed.cloudflare.com/__down?bytes=52428800"  # Cloudflare 50MB
-    "http://speedtest.tele2.net/100MB.zip"               # Tele2 100MB
-    "http://ping.online.net/100Mo.dat"                   # Online.net 100MB
-    "http://cachefly.cachefly.net/100mb.test"            # Cachefly 100MB
+    "https://speed.cloudflare.com/__down?bytes=52428800"
+    "http://speedtest.tele2.net/100MB.zip"
+    "http://ping.online.net/100Mo.dat"
+    "http://cachefly.cachefly.net/100mb.test"
+    "http://speedtest.belgium.webhosting.be/100MB.bin"
+    "http://speedtest-ny.turnkeyinternet.net/100mb.bin"
 )
 
 # 颜色定义
@@ -28,269 +30,341 @@ GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+PURPLE='\033[0;35m'
+NC='\033[0m'
 
-# 获取脚本的绝对路径
-SCRIPT_PATH=$(readlink -f "$0")
+# --- 0. 初始化与配置加载 ---
 
-# --- 核心功能函数 ---
+# 默认配置变量
+TELEGRAM_TOKEN=""
+TELEGRAM_CHAT_ID=""
+LIMIT_RATE="0"        # 0 代表不限速，单位可以是 2M, 500k
+IP_VERSION="auto"     # auto, 4, 6
+SMART_MODE="false"    # 是否开启智能补课
+MONTHLY_GOAL_GB="10"  # 月度目标流量 (GB)
 
-# 0. 加载/保存配置
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then
         source "$CONFIG_FILE"
     fi
-    # 如果没有加载到URL，使用默认
-    if [ -z "$URLS" ]; then
-        URLS=("${DEFAULT_URLS[@]}")
-    fi
 }
 
 save_config() {
-    echo "TELEGRAM_TOKEN=\"$TELEGRAM_TOKEN\"" > "$CONFIG_FILE"
-    echo "TELEGRAM_CHAT_ID=\"$TELEGRAM_CHAT_ID\"" >> "$CONFIG_FILE"
-    # 这里可以扩展保存更多设置
+    cat > "$CONFIG_FILE" <<EOF
+TELEGRAM_TOKEN="$TELEGRAM_TOKEN"
+TELEGRAM_CHAT_ID="$TELEGRAM_CHAT_ID"
+LIMIT_RATE="$LIMIT_RATE"
+IP_VERSION="$IP_VERSION"
+SMART_MODE="$SMART_MODE"
+MONTHLY_GOAL_GB="$MONTHLY_GOAL_GB"
+EOF
 }
 
-# 1. 检查更新功能
-check_update() {
-    echo -e "${CYAN}正在检查 GitHub 最新版本...${NC}"
-    # 获取 GitHub 上的脚本内容
-    REMOTE_SCRIPT=$(curl -s https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh)
-    
-    # 使用 sed 提取版本号
-    REMOTE_VERSION=$(echo "$REMOTE_SCRIPT" | sed -n 's/.*CURRENT_VERSION="\([0-9\.]*\)".*/\1/p')
+# --- 1. 核心工具函数 ---
 
-    if [ -z "$REMOTE_VERSION" ]; then
-        echo -e "${RED}无法从 GitHub 获取最新版本号！可能是网络问题。${NC}"
-        return
+# 检查并尝试安装 vnstat (智能模式依赖)
+check_vnstat() {
+    if ! command -v vnstat &> /dev/null; then
+        return 1 # 未安装
+    else
+        return 0 # 已安装
     fi
+}
 
-    if [ "$CURRENT_VERSION" != "$REMOTE_VERSION" ]; then
-        echo -e "${YELLOW}发现新版本！当前: $CURRENT_VERSION -> 最新: $REMOTE_VERSION${NC}"
-        echo -e "是否更新脚本? (y/n): "
-        read -r update_choice
-        if [ "$update_choice" == "y" ]; then
-            curl -s -o "$SCRIPT_PATH" https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh
-            chmod +x "$SCRIPT_PATH"
-            echo -e "${GREEN}脚本已更新！请重新运行。${NC}"
-            exit 0
+# 获取本月系统总流量 (GB)，依赖 vnstat
+get_system_monthly_traffic() {
+    if check_vnstat; then
+        # 尝试适配不同版本的 vnstat 输出
+        # 方法：获取 json (新版) 或 解析 -m (旧版)
+        # 这里使用一种较为通用的 grep 方法提取本月总流量 (RX+TX)
+        # 注意：这只是一个估算值，用于智能判断
+        local traffic_output
+        traffic_output=$(vnstat -m --oneline 2>/dev/null | awk -F';' '{print $11}') 
+        
+        # 如果 oneline 失败 (旧版本 vnstat)，尝试解析文本
+        if [ -z "$traffic_output" ]; then
+             # 这是一个极其简化的 fallback，实际旧版 vnstat 解析比较复杂，这里暂定为 0
+             echo "0"
         else
-            echo -e "${CYAN}跳过更新。${NC}"
+            # vnstat --oneline 输出通常是 bytes，需要转换
+            # 但不同版本差异大，这里为了脚本稳健性，建议用户安装 vnstat 2.x
+            # 简化逻辑：直接返回 vnstat 原始数值(Bytes) / 1024^3
+            echo | awk -v bytes="$traffic_output" '{printf "%.2f", bytes/1024/1024/1024}'
         fi
     else
-        echo -e "${GREEN}当前已经是最新版本 ($CURRENT_VERSION)！${NC}"
+        echo "0"
     fi
 }
 
-# 2. 下载核心逻辑
-run_traffic() {
-    load_config # 确保运行时加载最新配置
-    local target_mb=$1
-    local total_downloaded=0
-    local count=0
+# 记录脚本消耗的流量 (追加到日志)
+log_traffic_usage() {
+    local bytes=$1
+    # 格式: 时间戳|消耗字节
+    echo "$(date +%s)|$bytes" >> "$SCRIPT_LOG"
+}
 
-    # 获取已消耗的流量
-    if [ -f "$LOG_FILE" ]; then
-        total_downloaded=$(cat "$LOG_FILE")
-    fi
-
-    if [ -z "$target_mb" ]; then target_mb=100; fi
-
-    echo -e "${YELLOW}[运行中] 目标消耗: ${target_mb} MB (不占硬盘)${NC}"
-
-    while [ $total_downloaded -lt $target_mb ]; do
-        local url=${URLS[$RANDOM % ${#URLS[@]}]}
-        
-        # 显示当前使用的 User-Agent (调试用，可选)
-        local ua=$(random_user_agent)
-
-        curl -L -s -o /dev/null "$url" --connect-timeout 5 --max-time 120 --limit-rate 5M --user-agent "$ua"
-
-        if [ $? -eq 0 ]; then
-            total_downloaded=$((total_downloaded + 50))
-            count=$((count + 1))
-            echo -e " -> ${GREEN}成功下载第 $count 块 (累计约 ${total_downloaded} MB)${NC}"
-        else
-            echo -e " -> ${RED}下载超时或失败，更换链接重试...${NC}"
+# 计算脚本本月消耗总流量 (读取日志)
+get_script_monthly_usage() {
+    if [ ! -f "$SCRIPT_LOG" ]; then echo "0"; return; fi
+    
+    local current_month_start=$(date -d "$(date +%Y-%m-01)" +%s)
+    local total_bytes=0
+    
+    while IFS='|' read -r timestamp bytes; do
+        if [ "$timestamp" -ge "$current_month_start" ]; then
+            total_bytes=$(awk -v t="$total_bytes" -v b="$bytes" 'BEGIN {print t + b}')
         fi
-
-        sleep $((RANDOM % 3 + 1))
-    done
-
-    echo "$total_downloaded" > "$LOG_FILE"
-    echo -e "${GREEN}任务完成！${NC}"
-    send_telegram_notification "流量消耗任务完成，本次运行已达到目标，累计记录: $total_downloaded MB"
+    done < "$SCRIPT_LOG"
+    
+    # 转换为 GB
+    awk -v b="$total_bytes" 'BEGIN {printf "%.2f", b/1024/1024/1024}'
 }
 
-# 3. 获取随机 User-Agent
+# 发送 TG 通知
+send_telegram() {
+    local msg=$1
+    if [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+        curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+            -d chat_id="$TELEGRAM_CHAT_ID" \
+            -d text="$msg" > /dev/null
+    fi
+}
+
+# 获取随机 UA
 random_user_agent() {
     local agents=(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36"
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/91.0.4472.124"
-        "Mozilla/5.0 (X11; Linux x86_64) Firefox/89.0"
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.1 Safari/605.1.15"
+        "Mozilla/5.0 (X11; Linux x86_64; rv:89.0) Gecko/20100101 Firefox/89.0"
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36 Edg/92.0.902.55"
     )
     echo "${agents[$RANDOM % ${#agents[@]}]}"
 }
 
-# 4. 发送 Telegram 通知 (增强版)
-send_telegram_notification() {
-    local message=$1
-    if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
-        # 如果是手动运行，提示未配置；如果是后台运行，静默失败
-        if [ "$2" == "manual" ]; then
-            echo -e "${RED}错误：未配置 Telegram Bot Token 或 Chat ID。请先在菜单中设置。${NC}"
-        fi
-        return
-    fi
+# --- 2. 核心运行逻辑 ---
 
-    echo -e "${CYAN}正在发送 Telegram 通知...${NC}"
-    res=$(curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
-        -d chat_id="$TELEGRAM_CHAT_ID" \
-        -d text="$message")
-    
-    if [[ "$res" == *"\"ok\":true"* ]]; then
-        echo -e "${GREEN}通知发送成功！${NC}"
-    else
-        echo -e "${RED}发送失败，请检查 Token 和 ID 是否正确。API返回: $res${NC}"
-    fi
-}
-
-# 5. 配置 Telegram 菜单
-config_telegram() {
-    echo -e "${CYAN}--- Telegram 配置向导 ---${NC}"
-    echo -e "当前 Token: ${GREEN}${TELEGRAM_TOKEN:-未设置}${NC}"
-    echo -e "当前 Chat ID: ${GREEN}${TELEGRAM_CHAT_ID:-未设置}${NC}"
-    echo -e "---------------------------"
-    echo -e "1. 修改配置"
-    echo -e "2. 发送测试消息"
-    echo -e "0. 返回主菜单"
-    read -p "请选择: " tg_choice
-
-    case $tg_choice in
-        1)
-            read -p "请输入 Bot Token: " input_token
-            read -p "请输入 Chat ID: " input_chatid
-            if [ -n "$input_token" ] && [ -n "$input_chatid" ]; then
-                TELEGRAM_TOKEN=$input_token
-                TELEGRAM_CHAT_ID=$input_chatid
-                save_config
-                echo -e "${GREEN}配置已保存到 $CONFIG_FILE${NC}"
-            else
-                echo -e "${RED}输入不能为空！${NC}"
-            fi
-            sleep 1
-            config_telegram
-            ;;
-        2)
-            send_telegram_notification "Traffic Wizard: 这是一条测试消息。" "manual"
-            read -p "按回车键继续..."
-            config_telegram
-            ;;
-        *)
-            show_menu
-            ;;
-    esac
-}
-
-# 6. 定时任务管理
-add_cron() {
-    echo -e "${CYAN}--- 设置定时任务 ---${NC}"
-    echo -e "请输入每天消耗的流量 (MB):"
-    read -r daily_mb
-    echo -e "请输入每天几点开始运行 (0-23):"
-    read -r start_hour
-
-    if [[ ! "$daily_mb" =~ ^[0-9]+$ ]] || [[ ! "$start_hour" =~ ^[0-9]+$ ]]; then
-        echo -e "${RED}输入错误，请输入纯数字。${NC}"
-        return
-    fi
-
-    # 清理旧任务并添加新任务
-    crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
-    (crontab -l 2>/dev/null; echo "0 $start_hour * * * /bin/bash $SCRIPT_PATH auto $daily_mb >> /dev/null 2>&1") | crontab -
-
-    echo -e "${GREEN}已设置：每天 $start_hour 点自动跑 $daily_mb MB。${NC}"
-}
-
-del_cron() {
-    crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
-    echo -e "${GREEN}定时任务已清除。${NC}"
-}
-
-# 7. 主菜单
-show_menu() {
-    clear
-    load_config # 每次显示菜单都重新加载配置
-    echo -e "${BLUE}=======================================${NC}"
-    echo -e "   Traffic Wizard Pro (流量保号助手)   "
-    echo -e "${BLUE}=======================================${NC}"
-    echo -e "脚本版本: ${GREEN}$CURRENT_VERSION${NC}"
-    echo -e "TG 推送 : $(if [ -n "$TELEGRAM_TOKEN" ]; then echo -e "${GREEN}已配置${NC}"; else echo -e "${RED}未配置${NC}"; fi)"
-    echo -e "---------------------------------------"
-    echo -e "${YELLOW}>> 流量任务${NC}"
-    echo -e " 1. ${GREEN}立即运行${NC} (手动跑流量)"
-    echo -e " 2. ${GREEN}添加计划${NC} (定时自动跑)"
-    echo -e " 3. ${GREEN}查看计划${NC} (Crontab)"
-    echo -e " 4. ${RED}停止计划${NC} (删除任务)"
-    echo -e "---------------------------------------"
-    echo -e "${YELLOW}>> 高级设置${NC}"
-    echo -e " 5. ${CYAN}通知设置${NC} (配置 Telegram Bot)"
-    echo -e " 6. ${CYAN}检查更新${NC} (更新脚本版本)"
-    echo -e " 0. 退出"
-    echo -e "---------------------------------------"
-    echo -n "请输入选项: "
-    read -r choice
-
-    case $choice in
-        1)
-            echo -n "请输入要消耗的流量(MB): "
-            read -r mb
-            run_traffic "$mb"
-            read -p "按回车键返回..."
-            show_menu
-            ;;
-        2)
-            add_cron
-            read -p "按回车键返回..."
-            show_menu
-            ;;
-        3)
-            echo -e "${YELLOW}当前任务列表:${NC}"
-            crontab -l | grep "$SCRIPT_PATH" || echo "暂无任务"
-            read -p "按回车键返回..."
-            show_menu
-            ;;
-        4)
-            del_cron
-            read -p "按回车键返回..."
-            show_menu
-            ;;
-        5)
-            config_telegram
-            ;;
-        6)
-            check_update
-            read -p "按回车键返回..."
-            show_menu
-            ;;
-        0)
-            exit 0
-            ;;
-        *)
-            echo -e "无效输入"
-            sleep 1
-            show_menu
-            ;;
-    esac
-}
-
-# --- 脚本入口 ---
-# 如果有参数 'auto'，则直接进入后台运行模式，不加载菜单
-if [ "$1" == "auto" ]; then
+run_traffic() {
     load_config
-    run_traffic "$2"
+    local target_mb=$1
+    local mode=$2 # 'manual' or 'auto'
+
+    # --- 智能模式检查 ---
+    if [ "$mode" == "auto" ] && [ "$SMART_MODE" == "true" ]; then
+        if check_vnstat; then
+            local sys_usage=$(get_system_monthly_traffic)
+            # 简单的浮点数比较
+            local is_limit_reached=$(awk -v u="$sys_usage" -v g="$MONTHLY_GOAL_GB" 'BEGIN {print (u >= g) ? 1 : 0}')
+            
+            if [ "$is_limit_reached" -eq 1 ]; then
+                local log_msg="[智能模式] 本月系统流量($sys_usage GB) 已超过目标($MONTHLY_GOAL_GB GB)。停止运行。"
+                echo -e "${YELLOW}$log_msg${NC}"
+                send_telegram "$log_msg"
+                exit 0
+            else
+                echo -e "${GREEN}[智能模式] 本月已用 $sys_usage GB，未达标，开始补课...${NC}"
+            fi
+        else
+            echo -e "${RED}[警告] 开启了智能模式但未检测到 vnstat，将忽略智能判断强制运行。${NC}"
+        fi
+    fi
+
+    # --- 准备运行参数 ---
+    local total_downloaded=0 # bytes
+    local count=0
+    local target_bytes=$((target_mb * 1024 * 1024))
+    
+    # 构建 curl 参数
+    local curl_opts="-L -s -o /dev/null --connect-timeout 5 --max-time 180"
+    
+    # 限速设置
+    if [ "$LIMIT_RATE" != "0" ]; then
+        curl_opts="$curl_opts --limit-rate $LIMIT_RATE"
+        echo -e "${CYAN}已启用限速: $LIMIT_RATE${NC}"
+    fi
+
+    # IPv4/v6 设置
+    if [ "$IP_VERSION" == "4" ]; then curl_opts="$curl_opts -4"; fi
+    if [ "$IP_VERSION" == "6" ]; then curl_opts="$curl_opts -6"; fi
+
+    echo -e "${YELLOW}[开始运行] 目标消耗: ${target_mb} MB${NC}"
+
+    while [ $total_downloaded -lt $target_bytes ]; do
+        local url=${URLS[$RANDOM % ${#URLS[@]}]}
+        local ua=$(random_user_agent)
+        
+        # 估算本次下载量：限速模式下通过时间估算，或直接假设 50MB (非精准，但够用)
+        # 为了更真实，这里直接下载并获取 HTTP code
+        curl $curl_opts --user-agent "$ua" "$url"
+        
+        if [ $? -eq 0 ]; then
+            # 简单累加：如果限速了，下载会变慢，但我们按每次成功大概 50MB 计算
+            # *注：为了脚本轻量化，不做精准字节统计，采用估算法*
+            local chunk_size=$((50 * 1024 * 1024)) 
+            total_downloaded=$((total_downloaded + chunk_size))
+            log_traffic_usage "$chunk_size" # 写入统计日志
+            
+            count=$((count + 1))
+            local current_mb=$((total_downloaded / 1024 / 1024))
+            echo -e " -> ${GREEN}成功块 #$count (累计约 ${current_mb} MB)${NC}"
+        else
+            echo -e " -> ${RED}下载失败或超时 (可能是网络波动或IP协议不通)${NC}"
+        fi
+        
+        sleep $((RANDOM % 3 + 2))
+    done
+
+    echo -e "${GREEN}任务完成！${NC}"
+    send_telegram "Traffic Wizard: 任务完成。本次脚本消耗约 $target_mb MB。"
+}
+
+# --- 3. 菜单界面 ---
+
+settings_menu() {
+    while true; do
+        clear
+        load_config
+        echo -e "${PURPLE}=== 高级设置 ===${NC}"
+        echo -e "1. 配置 Telegram Bot [当前: $([ -n "$TELEGRAM_TOKEN" ] && echo "${GREEN}已配${NC}" || echo "${RED}无${NC}")]"
+        echo -e "2. 流量限速设置    [当前: $([ "$LIMIT_RATE" == "0" ] && echo "${YELLOW}不限${NC}" || echo "${GREEN}$LIMIT_RATE${NC}")]"
+        echo -e "3. IP 协议偏好     [当前: ${CYAN}${IP_VERSION:-auto}${NC}]"
+        echo -e "4. 智能补课模式    [当前: $([ "$SMART_MODE" == "true" ] && echo "${GREEN}开启 ($MONTHLY_GOAL_GB GB)${NC}" || echo "${RED}关闭${NC}")]"
+        echo -e "0. 返回主菜单"
+        echo -e "----------------"
+        read -p "选择: " s_choice
+        
+        case $s_choice in
+            1)
+                read -p "Bot Token: " TELEGRAM_TOKEN
+                read -p "Chat ID: " TELEGRAM_CHAT_ID
+                save_config
+                send_telegram "Traffic Wizard: 测试通知成功！"
+                echo "配置已保存并发送了测试消息。"
+                read -p "按回车继续..."
+                ;;
+            2)
+                echo "请输入限速值 (例如 2M, 500k, 10M)。输入 0 为不限速。"
+                read -p "限速值: " LIMIT_RATE
+                save_config
+                ;;
+            3)
+                echo "1. 自动 (auto)"
+                echo "2. 仅 IPv4 (-4)"
+                echo "3. 仅 IPv6 (-6)"
+                read -p "选择: " ip_c
+                case $ip_c in
+                    2) IP_VERSION="4" ;;
+                    3) IP_VERSION="6" ;;
+                    *) IP_VERSION="auto" ;;
+                esac
+                save_config
+                ;;
+            4)
+                if ! check_vnstat; then
+                    echo -e "${RED}系统未检测到 vnstat！智能模式无法工作。${NC}"
+                    echo "Debian/Ubuntu 安装: apt update && apt install vnstat"
+                    echo "Alpine 安装: apk add vnstat"
+                    read -p "按回车继续..."
+                else
+                    if [ "$SMART_MODE" == "true" ]; then
+                        SMART_MODE="false"
+                    else
+                        SMART_MODE="true"
+                        read -p "请输入每月目标流量 (GB，整数): " MONTHLY_GOAL_GB
+                    fi
+                    save_config
+                fi
+                ;;
+            0) return ;;
+            *) ;;
+        esac
+    done
+}
+
+show_stats() {
+    clear
+    local script_used=$(get_script_monthly_usage)
+    local sys_used=$(get_system_monthly_traffic)
+    
+    echo -e "${CYAN}=== 流量统计 (本月) ===${NC}"
+    echo -e "脚本消耗 (估算): ${GREEN}${script_used} GB${NC}"
+    
+    if check_vnstat; then
+        echo -e "系统总消耗 (vnstat): ${YELLOW}${sys_used} GB${NC}"
+        if [ "$SMART_MODE" == "true" ]; then
+             echo -e "智能目标: ${PURPLE}${MONTHLY_GOAL_GB} GB${NC}"
+             # 计算剩余
+             local remaining=$(awk -v g="$MONTHLY_GOAL_GB" -v u="$sys_used" 'BEGIN {print g-u}')
+             if (( $(echo "$remaining > 0" | bc -l 2>/dev/null || awk -v r="$remaining" 'BEGIN{print (r>0)}') )); then
+                 echo -e "距离目标还差: ${RED}${remaining} GB${NC}"
+             else
+                 echo -e "状态: ${GREEN}已达标，智能模式将暂停脚本运行。${NC}"
+             fi
+        fi
+    else
+        echo -e "系统总消耗: ${RED}未安装 vnstat，无法读取${NC}"
+    fi
+    echo -e "------------------------"
+    read -p "按回车返回..."
+}
+
+# 定时任务 (保持不变，略微简化显示)
+cron_menu() {
+    echo -e "1. 添加计划 (每天自动跑)"
+    echo -e "2. 删除计划"
+    echo -e "3. 查看 Crontab"
+    echo -e "0. 返回"
+    read -p "选择: " c_choice
+    case $c_choice in
+        1)
+            read -p "每天跑多少MB: " d_mb
+            read -p "几点开始(0-23): " d_hour
+            crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
+            (crontab -l 2>/dev/null; echo "0 $d_hour * * * /bin/bash $SCRIPT_PATH auto $d_mb >> /dev/null 2>&1") | crontab -
+            echo "已添加。"
+            sleep 1
+            ;;
+        2)
+            crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
+            echo "已删除。"
+            sleep 1
+            ;;
+        3) crontab -l | grep "$SCRIPT_PATH"; read -p "按回车..." ;;
+    esac
+}
+
+main_menu() {
+    load_config
+    clear
+    echo -e "${BLUE}Traffic Wizard Ultimate v${CURRENT_VERSION}${NC}"
+    echo -e "当前模式: $([ "$SMART_MODE" == "true" ] && echo "${GREEN}智能补课${NC}" || echo "${YELLOW}普通模式${NC}") | 限速: ${CYAN}${LIMIT_RATE}${NC}"
+    echo -e "--------------------------"
+    echo -e " 1. ${GREEN}立即运行${NC} (手动)"
+    echo -e " 2. ${YELLOW}定时任务管理${NC}"
+    echo -e " 3. ${CYAN}流量统计面板${NC} (本月数据)"
+    echo -e " 4. ${PURPLE}参数设置${NC} (限速/TG/IPv4/智能模式)"
+    echo -e " 0. 退出"
+    echo -e "--------------------------"
+    read -p "请输入选项: " choice
+    
+    case $choice in
+        1) 
+            read -p "输入消耗流量(MB): " mb
+            run_traffic "$mb" "manual"
+            read -p "结束. 按回车..."
+            main_menu
+            ;;
+        2) cron_menu; main_menu ;;
+        3) show_stats; main_menu ;;
+        4) settings_menu; main_menu ;;
+        0) exit 0 ;;
+        *) main_menu ;;
+    esac
+}
+
+# --- 入口 ---
+if [ "$1" == "auto" ]; then
+    run_traffic "$2" "auto"
 else
-    show_menu
+    main_menu
 fi
