@@ -1,19 +1,29 @@
 #!/bin/bash
 
 # =========================================================
-# 脚本名称: Traffic Wizard (轻量级流量消耗交互脚本)
+# 脚本名称: Traffic Wizard (流量消耗交互脚本)
 # 适用环境: Alpine, Debian, Ubuntu (256M内存 NAT VPS)
 # 功能: 交互式菜单、后台静默运行、定时任务管理
 # =========================================================
 
+# 当前脚本版本
+CURRENT_VERSION="1.0.0"
+
+# GitHub 上的脚本版本
+REMOTE_VERSION=$(curl -s https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh | grep -oP 'CURRENT_VERSION="\K[0-9\.]+')
+
 # --- 全局配置 ---
-# 测速文件列表 (大厂CDN，速度快且稳定)
+# 测速文件列表
 URLS=(
     "https://speed.cloudflare.com/__down?bytes=52428800"  # Cloudflare 50MB
     "http://speedtest.tele2.net/100MB.zip"               # Tele2 100MB
     "http://ping.online.net/100Mo.dat"                   # Online.net 100MB
     "http://cachefly.cachefly.net/100mb.test"            # Cachefly 100MB
 )
+
+# Telegram Bot 配置
+TELEGRAM_TOKEN="YOUR_BOT_TOKEN"
+TELEGRAM_CHAT_ID="YOUR_CHAT_ID"
 
 # 颜色定义
 RED='\033[0;31m'
@@ -24,45 +34,94 @@ NC='\033[0m' # No Color
 
 # 获取脚本的绝对路径
 SCRIPT_PATH=$(readlink -f "$0")
+LOG_FILE="/tmp/traffic_usage.log"
 
 # --- 核心功能函数 ---
 
-# 1. 下载核心逻辑 (直接消耗流量)
+# 1. 检查更新功能
+check_update() {
+    if [ "$CURRENT_VERSION" != "$REMOTE_VERSION" ]; then
+        echo -e "${YELLOW}发现新版本！当前版本: $CURRENT_VERSION，最新版本: $REMOTE_VERSION${NC}"
+        echo -e "是否更新脚本? (y/n): "
+        read -r update_choice
+        if [ "$update_choice" == "y" ]; then
+            curl -s -o "$SCRIPT_PATH" https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh
+            echo -e "${GREEN}脚本已更新到最新版本！${NC}"
+        else
+            echo -e "${CYAN}跳过更新，继续使用当前版本。${NC}"
+        fi
+    else
+        echo -e "${GREEN}当前已经是最新版本！${NC}"
+    fi
+}
+
+# 2. 下载核心逻辑 (直接消耗流量)
 # 参数 $1: 目标流量(MB)
 run_traffic() {
     local target_mb=$1
     local total_downloaded=0
     local count=0
-    
+
+    # 获取已消耗的流量
+    if [ -f "$LOG_FILE" ]; then
+        total_downloaded=$(cat "$LOG_FILE")
+    fi
+
     # 简单的防止并发导致卡死
     if [ -z "$target_mb" ]; then target_mb=100; fi
-    
+
     echo -e "${YELLOW}[运行中] 目标消耗: ${target_mb} MB (不占硬盘)${NC}"
 
     while [ $total_downloaded -lt $target_mb ]; do
         # 随机取链接
         local url=${URLS[$RANDOM % ${#URLS[@]}]}
-        
-        # 估算每个文件大小(MB)，简单按50MB算，脚本不求精确，只求消耗
-        # 使用curl下载到 /dev/null
-        curl -L -s -o /dev/null "$url" --connect-timeout 5 --max-time 120
-        
+
+        # 估算每个文件大小(MB)，假设每次下载约 50MB
+        # 使用curl下载到 /dev/null，限制下载速度为 2MB/s
+        curl -L -s -o /dev/null "$url" --connect-timeout 5 --max-time 120 --limit-rate 2M --user-agent "$(random_user_agent)"
+
         if [ $? -eq 0 ]; then
-            # 假设每次成功下载大约 50-100MB，这里保守计数增加 50MB
+            # 成功下载，累积流量
             total_downloaded=$((total_downloaded + 50))
             count=$((count + 1))
             echo -e " -> ${GREEN}成功下载第 $count 块 (累计约 ${total_downloaded} MB)${NC}"
         else
             echo -e " -> ${RED}下载超时或失败，重试中...${NC}"
         fi
-        
+
         # 随机休眠 1-3秒
         sleep $((RANDOM % 3 + 1))
     done
+
+    # 更新日志
+    echo "$total_downloaded" > "$LOG_FILE"
     echo -e "${GREEN}任务完成！${NC}"
+
+    # 发送 Telegram 通知
+    send_telegram_notification "流量消耗任务完成，已消耗 $total_downloaded MB"
 }
 
-# 2. 添加定时任务
+# 3. 获取随机 User-Agent
+random_user_agent() {
+    local agents=(
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "Mozilla/5.0 (X11; Ubuntu; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Firefox/89.0"
+        "Mozilla/5.0 (Linux; Android 10; Pixel 4 XL) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.120 Mobile Safari/537.36"
+    )
+    echo "${agents[$RANDOM % ${#agents[@]}]}"
+}
+
+# 4. 发送 Telegram 通知
+send_telegram_notification() {
+    local message=$1
+    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" \
+        -d chat_id="$TELEGRAM_CHAT_ID" \
+        -d text="$message"
+}
+
+# 5. 添加定时任务
 add_cron() {
     echo -e "${CYAN}--- 设置定时任务 ---${NC}"
     echo -e "请输入每天消耗的流量 (单位MB，例如 500):"
@@ -78,21 +137,20 @@ add_cron() {
     # 清理旧的相同任务
     crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
 
-    # 添加新任务 (为了适配Alpine，明确使用/bin/bash)
-    # 格式: 0 3 * * * /bin/bash /path/to/script.sh auto 500
+    # 添加新任务
     (crontab -l 2>/dev/null; echo "0 $start_hour * * * /bin/bash $SCRIPT_PATH auto $daily_mb >> /dev/null 2>&1") | crontab -
-    
+
     echo -e "${GREEN}成功设置！每天 $start_hour 点将自动消耗 $daily_mb MB 流量。${NC}"
     echo -e "${YELLOW}提示: 请确保 cron 服务正在运行 (Alpine: rc-service crond start)${NC}"
 }
 
-# 3. 删除定时任务
+# 6. 删除定时任务
 del_cron() {
     crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
     echo -e "${GREEN}已清除本脚本的所有定时任务。${NC}"
 }
 
-# 4. 显示菜单
+# 7. 显示菜单
 show_menu() {
     clear
     echo -e "${CYAN}=======================================${NC}"
@@ -147,12 +205,9 @@ show_menu() {
 }
 
 # --- 脚本入口 ---
-
-# 检查是否为自动运行模式 (通过参数判断)
-# 如果第一个参数是 "auto"，则直接在后台执行流量消耗，不显示菜单
+check_update
 if [ "$1" == "auto" ]; then
     run_traffic "$2"
 else
-    # 否则显示交互菜单
     show_menu
 fi
