@@ -31,3 +31,61 @@
 
 ```bash
 curl -sS -O https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh && chmod +x xiaohao.sh && ./xiaohao.sh
+```
+如果无法连接 GitHub，可以使用加速源：
+
+```bash
+curl -sS -O https://ghproxy.com/https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh && chmod +x xiaohao.sh && ./xiaohao.sh
+```
+
+🎮 菜单功能说明
+运行脚本后，你将看到如下菜单：
+
+立即运行 (手动)：输入想要消耗的流量数值（MB），立即执行下载任务。
+
+定时任务 (自动)：
+
+添加计划：设置每天几点开始运行，以及每天的目标流量。
+
+删除/查看计划：管理后台 Crontab 任务。
+
+高级设置：
+
+配置 Telegram Bot：填入 Token 和 Chat ID 开启推送。
+
+流量限速设置：限制 curl 的最大下载速度。
+
+IP 协议偏好：强制使用 IPv4 或 IPv6，或自动选择。
+
+智能补课模式：设置月度总目标（GB），脚本将根据系统实际用量智能决策。
+
+随机流量波动：开启/关闭拟人化波动。
+
+一键安装 vnstat：自动识别系统并安装流量统计服务（推荐）。
+
+重置/卸载：清理日志或彻底删除脚本（含 vnstat 卸载选项）。
+
+检查更新：联网比对 GitHub 版本，手动选择是否更新。
+
+⚙️ 配置文件
+脚本会自动在用户目录下生成隐藏配置文件，升级脚本不会丢失配置：
+
+路径：~/.traffic_wizard.conf
+
+日志：~/.traffic_wizard.log
+
+📋 常见问题
+Q: 为什么显示 "系统总计: 0 GB (内核读取)"？ A: 这表示你没有安装 vnstat，或者网卡流量确实为 0。建议在“高级设置”中选择“一键安装 vnstat”，这样能获得重启不丢的精准统计。
+
+Q: 智能模式如何工作？ A: 假设你设置月度目标 100GB。脚本每次运行前会检查 vnstat 数据。如果系统总流量已经达到 100GB，脚本会直接退出并通知你“已达标”，只有未达标时才会继续下载。
+
+Q: 为什么下载会失败？ A: 脚本内置了多个大厂测速节点（Cloudflare, Tele2 等）。如果当前网络环境无法连接某个节点，脚本会自动重试或切换链接。
+
+⚠️ 免责声明
+本脚本仅用于 VPS 流量消耗测试或保号目的。
+
+请勿在严禁跑流量的商家（如部分工单明确禁止的商家）上使用，否则可能导致封机。
+
+作者不对使用本脚本产生的任何后果（如流量超额扣费、VPS 被封禁等）负责。
+
+Star ⭐ This Repository if it helps you!
