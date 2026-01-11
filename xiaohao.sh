@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 随机增强版)
-# 版本: 2.8.0 (修复汉化、新增每日随机时间执行)
+# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 稳定更新版)
+# 版本: 2.8.1 (修复: 多源更新检测、延长超时、增强稳定性)
 # GitHub: https://github.com/ioiy/xiaohao
 # =========================================================
 
@@ -32,7 +32,7 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # 当前版本
-CURRENT_VERSION="2.8.0"
+CURRENT_VERSION="2.8.1"
 
 # --- 0. 初始化与配置加载 ---
 TELEGRAM_TOKEN=""
@@ -132,23 +132,50 @@ random_user_agent() {
     echo "${agents[$RANDOM % ${#agents[@]}]}"
 }
 
-check_update() {
-    echo -e "${CYAN}正在连接 GitHub 检查更新...${NC}"
-    local remote_url="https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh"
-    local remote_script=$(curl -s --connect-timeout 5 "https://ghproxy.com/$remote_url")
-    if [ -z "$remote_script" ]; then remote_script=$(curl -s --connect-timeout 5 "$remote_url"); fi
-    local remote_version=$(echo "$remote_script" | sed -n 's/.*CURRENT_VERSION="\([0-9\.]*\)".*/\1/p')
+# --- 2. 核心功能升级：多源更新检测 ---
 
-    if [ -z "$remote_version" ]; then echo -e "${RED}检查失败。${NC}"; return; fi
+check_update() {
+    echo -e "${CYAN}正在连接 GitHub 检查更新 (多源尝试)...${NC}"
+    
+    # 定义多个更新源：代理1, 代理2, 直连
+    local mirrors=(
+        "https://ghproxy.net/https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh"
+        "https://fastly.jsdelivr.net/gh/ioiy/xiaohao@main/xiaohao.sh"
+        "https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh"
+    )
+    
+    local remote_script=""
+    local remote_version=""
+
+    # 循环尝试下载
+    for url in "${mirrors[@]}"; do
+        # -k 忽略证书错误, -L 跟随重定向, 超时 15秒
+        remote_script=$(curl -s -k -L --connect-timeout 15 "$url")
+        if [ -n "$remote_script" ]; then
+            # 尝试提取版本号
+            remote_version=$(echo "$remote_script" | sed -n 's/.*CURRENT_VERSION="\([0-9\.]*\)".*/\1/p')
+            if [ -n "$remote_version" ]; then
+                break # 成功获取，跳出循环
+            fi
+        fi
+    done
+
+    if [ -z "$remote_version" ]; then 
+        echo -e "${RED}检查失败：所有源均无法连接，请检查网络或DNS。${NC}"
+        return
+    fi
+
     echo -e "当前: v$CURRENT_VERSION | 最新: v$remote_version"
 
     if [ "$CURRENT_VERSION" != "$remote_version" ]; then
         read -p "发现新版本，是否更新? (y/n): " confirm
         if [ "$confirm" == "y" ]; then
             echo "$remote_script" > "$SCRIPT_PATH"; chmod +x "$SCRIPT_PATH"
-            echo -e "${GREEN}更新成功。${NC}"; exit 0
+            echo -e "${GREEN}更新成功。请重新运行。${NC}"; exit 0
         fi
-    else echo -e "${GREEN}无需更新。${NC}"; fi
+    else 
+        echo -e "${GREEN}当前已是最新版本。${NC}"
+    fi
 }
 
 uninstall_dependencies() {
@@ -216,7 +243,7 @@ run_traffic() {
     local total_downloaded=0
     local count=0
     local target_bytes=$((target_mb * 1024 * 1024))
-    local curl_opts="-L -s -o /dev/null -k --retry 2 --connect-timeout 10 --max-time 180"
+    local curl_opts="-L -s -o /dev/null -k --retry 2 --connect-timeout 15 --max-time 180"
     if [ "$LIMIT_RATE" != "0" ]; then curl_opts="$curl_opts --limit-rate $LIMIT_RATE"; fi
     if [ "$IP_VERSION" == "4" ]; then curl_opts="$curl_opts -4"; fi
     if [ "$IP_VERSION" == "6" ]; then curl_opts="$curl_opts -6"; fi
@@ -244,7 +271,6 @@ run_traffic() {
 
 # --- 4. 菜单逻辑 ---
 
-# [新增] 专门的计划任务菜单
 cron_menu() {
     while true; do
         clear; show_dashboard
@@ -258,8 +284,7 @@ cron_menu() {
         case $c_choice in
             1)
                 read -p "请输入每天消耗流量 (MB): " m
-                read -p "请输入开始时间 (0-23点): " h # [已修复中文]
-                # 删除旧任务，添加新固定任务
+                read -p "请输入开始时间 (0-23点): " h
                 crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
                 (crontab -l 2>/dev/null; echo "0 $h * * * /bin/bash $SCRIPT_PATH auto $m >> /dev/null 2>&1") | crontab -
                 echo -e "${GREEN}已添加: 每天 $h 点运行。${NC}"; sleep 2
@@ -267,8 +292,6 @@ cron_menu() {
             2)
                 read -p "请输入每天消耗流量 (MB): " m
                 echo -e "${PURPLE}[随机模式] 脚本将在每天 00:00 启动，随机等待 0~18 小时后开始跑流量。${NC}"
-                # 随机逻辑: sleep 0 ~ 65534秒 (约18小时)
-                # 注意: RANDOM 是 0-32767，两个 RANDOM 相加大约可达 18小时
                 crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
                 (crontab -l 2>/dev/null; echo "0 0 * * * sleep \$((RANDOM + RANDOM)) && /bin/bash $SCRIPT_PATH auto $m >> /dev/null 2>&1") | crontab -
                 echo -e "${GREEN}已添加: 每天 0点启动并随机延迟执行。${NC}"; sleep 3
@@ -344,7 +367,7 @@ main_menu() {
     while true; do
         clear; show_dashboard 
         echo -e " 1. ${GREEN}立即运行${NC} (手动)"
-        echo -e " 2. ${YELLOW}定时任务${NC} (管理计划)" # [修改]
+        echo -e " 2. ${YELLOW}定时任务${NC} (管理计划)"
         echo -e " 3. ${PURPLE}高级设置${NC} (链接/配置/卸载)"
         echo -e " 4. ${RED}停止运行${NC} (Kill All)"
         echo -e " 5. ${BLUE}检查更新${NC}"
@@ -353,7 +376,7 @@ main_menu() {
         read -p "请输入选项: " choice
         case $choice in
             1) read -p "输入流量(MB): " mb; run_traffic "$mb" "manual"; read -p "按回车..." ;;
-            2) cron_menu ;; # [修改] 进入子菜单
+            2) cron_menu ;;
             3) settings_menu ;;
             4) kill_all_tasks ;;
             5) check_update; read -p "按回车..." ;;
