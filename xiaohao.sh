@@ -9,9 +9,6 @@
 # 当前脚本版本
 CURRENT_VERSION="1.0.0"
 
-# GitHub 上的脚本版本
-REMOTE_VERSION=$(curl -s https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh | grep -oP 'CURRENT_VERSION="\K[0-9\.]+')
-
 # --- 全局配置 ---
 # 测速文件列表
 URLS=(
@@ -40,6 +37,17 @@ LOG_FILE="/tmp/traffic_usage.log"
 
 # 1. 检查更新功能
 check_update() {
+    # 获取 GitHub 上的脚本内容
+    REMOTE_SCRIPT=$(curl -s https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh)
+    
+    # 使用 awk 提取版本号
+    REMOTE_VERSION=$(echo "$REMOTE_SCRIPT" | awk -F'=' '/CURRENT_VERSION/ {print $2}' | tr -d '"')
+
+    if [ -z "$REMOTE_VERSION" ]; then
+        echo -e "${RED}无法从 GitHub 获取最新版本号！${NC}"
+        return
+    fi
+
     if [ "$CURRENT_VERSION" != "$REMOTE_VERSION" ]; then
         echo -e "${YELLOW}发现新版本！当前版本: $CURRENT_VERSION，最新版本: $REMOTE_VERSION${NC}"
         echo -e "是否更新脚本? (y/n): "
