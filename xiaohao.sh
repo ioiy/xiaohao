@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 可视化版)
-# 版本: 2.9.1 (新增: 任务自动中文翻译、菜单置顶显示)
+# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 完美交互版)
+# 版本: 2.9.2 (主菜单净化、停止功能归档、更新检测修复)
 # GitHub: https://github.com/ioiy/xiaohao
 # =========================================================
 
@@ -32,7 +32,7 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # 当前版本
-CURRENT_VERSION="2.9.1"
+CURRENT_VERSION="2.9.2"
 
 # --- 0. 初始化与配置加载 ---
 TELEGRAM_TOKEN=""
@@ -129,12 +129,14 @@ random_user_agent() {
 
 # --- 2. 功能函数 ---
 
+# [修复] 增加防缓存机制的更新检测
 check_update() {
     echo -e "${CYAN}正在连接 GitHub 检查更新...${NC}"
+    local timestamp=$(date +%s) # 时间戳防止CDN缓存
     local mirrors=(
-        "https://ghproxy.net/https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh"
-        "https://fastly.jsdelivr.net/gh/ioiy/xiaohao@main/xiaohao.sh"
-        "https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh"
+        "https://ghproxy.net/https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh?t=$timestamp"
+        "https://fastly.jsdelivr.net/gh/ioiy/xiaohao@main/xiaohao.sh?t=$timestamp"
+        "https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh?t=$timestamp"
     )
     local remote_script=""
     local remote_version=""
@@ -145,15 +147,27 @@ check_update() {
             if [ -n "$remote_version" ]; then break; fi
         fi
     done
-    if [ -z "$remote_version" ]; then echo -e "${RED}检查失败。${NC}"; return; fi
+    
+    if [ -z "$remote_version" ]; then 
+        echo -e "${RED}检查失败：无法连接服务器。${NC}"
+        return
+    fi
+    
     echo -e "当前: v$CURRENT_VERSION | 最新: v$remote_version"
+    
     if [ "$CURRENT_VERSION" != "$remote_version" ]; then
-        read -p "发现新版本，是否更新? (y/n): " confirm
+        echo -e "${YELLOW}发现新版本！${NC}"
+        read -p "是否更新? (y/n): " confirm
         if [ "$confirm" == "y" ]; then
-            echo "$remote_script" > "$SCRIPT_PATH"; chmod +x "$SCRIPT_PATH"
+            # 移除可能存在的URL参数内容，纯净覆盖
+            # 注意：curl 获取的内容本身不含参数，直接覆盖即可
+            echo "$remote_script" > "$SCRIPT_PATH"
+            chmod +x "$SCRIPT_PATH"
             echo -e "${GREEN}更新成功。请重新运行。${NC}"; exit 0
         fi
-    else echo -e "${GREEN}无需更新。${NC}"; fi
+    else 
+        echo -e "${GREEN}无需更新。${NC}"
+    fi
 }
 
 uninstall_dependencies() {
@@ -263,30 +277,21 @@ run_traffic() {
     send_telegram "Traffic Wizard: 任务完成。消耗约 $target_mb MB。"
 }
 
-# --- 4. 菜单逻辑 (任务可视化版) ---
+# --- 4. 菜单逻辑 (最终版) ---
 
 cron_menu() {
     while true; do
         clear; show_dashboard
         echo -e "${YELLOW}=== 当前生效的定时任务 ===${NC}"
-        
-        # [新增] 核心解析逻辑
-        # 1. 获取所有包含脚本路径的任务
         local tasks=$(crontab -l 2>/dev/null | grep "$SCRIPT_PATH")
-        
         if [ -z "$tasks" ]; then
             echo -e "${RED}    暂无计划任务${NC}"
         else
-            # 2. 逐行读取并翻译
             echo "$tasks" | while read -r line; do
-                # 提取流量MB (位于 auto 后面)
                 local mb=$(echo "$line" | grep -o 'auto [0-9]*' | awk '{print $2}')
-                
-                # 判断是随机模式还是固定模式
                 if [[ "$line" == *"sleep"* ]]; then
                     echo -e " ${PURPLE}[随机]${NC} 每天 00:00 启动 (随机延迟执行) -> 计划跑 ${GREEN}${mb}MB${NC}"
                 else
-                    # 提取小时 (crontab 的第2列)
                     local hour=$(echo "$line" | awk '{print $2}')
                     echo -e " ${CYAN}[固定]${NC} 每天 ${hour}点 运行             -> 计划跑 ${GREEN}${mb}MB${NC}"
                 fi
@@ -328,7 +333,8 @@ system_tools_menu() {
         echo -e "3. ${GREEN}实时网速监视器${NC} (Live Speed)"
         echo -e "4. ${GREEN}查看运行日志${NC} (Logs)"
         echo -e "5. 重置流量统计数据"
-        echo -e "6. ${RED}彻底卸载脚本${NC}"
+        echo -e "6. ${RED}停止当前运行 (Kill)${NC}" 
+        echo -e "7. ${RED}彻底卸载脚本${NC}"
         echo -e "0. 返回主菜单"
         read -p "选择: " sys_c
         case $sys_c in
@@ -337,7 +343,8 @@ system_tools_menu() {
             3) live_speed ;;
             4) view_log ;;
             5) reset_stats ;;
-            6) uninstall_script ;;
+            6) kill_all_tasks ;;
+            7) uninstall_script ;;
             0) return ;;
         esac
     done
@@ -371,9 +378,9 @@ main_menu() {
         echo -e " [ 6] IP 偏好  [当前: ${CYAN}${IP_VERSION:-auto}${NC}]"
         echo -e " [ 7] 添加自定义链接"
         echo -e "----------------------------------------"
-        echo -e " [ 8] ${PURPLE}系统工具${NC} (日志/卸载/vnstat)"
+        echo -e " [ 8] ${PURPLE}系统工具${NC} (日志/卸载/vnstat/停止)"
         echo -e " [ 9] 检查更新"
-        echo -e " [ 0] 退出 / 停止运行"
+        echo -e " [ 0] 退出脚本"
         echo -e "----------------------------------------"
         read -p "请输入选项: " choice
         case $choice in
@@ -396,9 +403,7 @@ main_menu() {
                else echo "无效链接"; fi; sleep 1 ;;
             8) system_tools_menu ;;
             9) check_update; read -p "按回车..." ;;
-            0) 
-               read -p "1.退出菜单  2.停止所有运行中任务: " ex_c
-               if [ "$ex_c" == "2" ]; then kill_all_tasks; else exit 0; fi ;;
+            0) exit 0 ;;
             *) ;;
         esac
     done
