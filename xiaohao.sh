@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 自由版)
-# 版本: 2.7.0 (移除熔断保护、新增自定义链接、一键停止)
+# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 随机增强版)
+# 版本: 2.8.0 (修复汉化、新增每日随机时间执行)
 # GitHub: https://github.com/ioiy/xiaohao
 # =========================================================
 
@@ -32,7 +32,7 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # 当前版本
-CURRENT_VERSION="2.7.0"
+CURRENT_VERSION="2.8.0"
 
 # --- 0. 初始化与配置加载 ---
 TELEGRAM_TOKEN=""
@@ -42,15 +42,11 @@ IP_VERSION="auto"
 SMART_MODE="false"    
 MONTHLY_GOAL_GB="10"
 ENABLE_JITTER="true"
-CUSTOM_URLS_STR=""    # 存储用户自定义链接，用逗号分隔
+CUSTOM_URLS_STR="" 
 
 load_config() {
     if [ -f "$CONFIG_FILE" ]; then source "$CONFIG_FILE"; fi
-    
-    # 重置并合并链接池
     URLS=("${DEFAULT_URLS[@]}")
-    
-    # 如果有自定义链接，加入池子
     if [ -n "$CUSTOM_URLS_STR" ]; then
         IFS=',' read -ra USER_URLS <<< "$CUSTOM_URLS_STR"
         URLS+=("${USER_URLS[@]}")
@@ -91,7 +87,6 @@ get_system_traffic() {
             return
         fi
     fi
-    # 内核读取模式
     local iface=$(get_main_interface)
     if [ -n "$iface" ]; then
         local line=$(grep "$iface" /proc/net/dev)
@@ -137,8 +132,6 @@ random_user_agent() {
     echo "${agents[$RANDOM % ${#agents[@]}]}"
 }
 
-# --- 2. 功能函数 ---
-
 check_update() {
     echo -e "${CYAN}正在连接 GitHub 检查更新...${NC}"
     local remote_url="https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh"
@@ -155,9 +148,7 @@ check_update() {
             echo "$remote_script" > "$SCRIPT_PATH"; chmod +x "$SCRIPT_PATH"
             echo -e "${GREEN}更新成功。${NC}"; exit 0
         fi
-    else
-        echo -e "${GREEN}无需更新。${NC}"
-    fi
+    else echo -e "${GREEN}无需更新。${NC}"; fi
 }
 
 uninstall_dependencies() {
@@ -172,15 +163,11 @@ uninstall_dependencies() {
     fi
 }
 
-# [新增] 紧急停止
 kill_all_tasks() {
     echo -e "${YELLOW}正在终止所有后台流量任务...${NC}"
-    # 杀掉所有包含当前脚本路径的 bash 进程，排除自己
     pgrep -f "$SCRIPT_PATH" | grep -v $$ | xargs -r kill -9
-    # 杀掉 curl 进程 (谨慎操作，假设只杀本脚本起的curl有点难区分，这里简单粗暴杀掉长时间运行的curl)
-    # 为安全起见，只提示
     echo -e "${GREEN}脚本后台进程已停止。${NC}"
-    echo -e "${YELLOW}提示: 如果 curl 还在运行，请手动执行 'killall curl' (如果有权限)${NC}"
+    echo -e "${YELLOW}提示: 如果 curl 还在运行，请手动执行 'killall curl'${NC}"
     sleep 1
 }
 
@@ -204,13 +191,11 @@ uninstall_script() {
     fi
 }
 
-# --- 3. 核心下载逻辑 (无熔断版) ---
+# --- 3. 核心下载逻辑 ---
 run_traffic() {
     load_config
     local target_mb=$1
     local mode=$2
-
-    # [已移除] 负载检查 check_load 及其熔断逻辑
 
     if [ "$mode" == "auto" ] && [ "$SMART_MODE" == "true" ]; then
         local sys_usage=$(get_system_traffic)
@@ -257,7 +242,50 @@ run_traffic() {
     send_telegram "Traffic Wizard: 任务完成。消耗约 $target_mb MB。"
 }
 
-# --- 4. 仪表盘与菜单 ---
+# --- 4. 菜单逻辑 ---
+
+# [新增] 专门的计划任务菜单
+cron_menu() {
+    while true; do
+        clear; show_dashboard
+        echo -e "${YELLOW}=== 定时任务管理 ===${NC}"
+        echo -e "1. 添加 ${GREEN}固定时间${NC} 计划 (如每天 3点)"
+        echo -e "2. 添加 ${PURPLE}随机时间${NC} 计划 (每天时间都不一样)"
+        echo -e "3. 删除所有计划"
+        echo -e "4. 查看当前计划"
+        echo -e "0. 返回上级"
+        read -p "选择: " c_choice
+        case $c_choice in
+            1)
+                read -p "请输入每天消耗流量 (MB): " m
+                read -p "请输入开始时间 (0-23点): " h # [已修复中文]
+                # 删除旧任务，添加新固定任务
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
+                (crontab -l 2>/dev/null; echo "0 $h * * * /bin/bash $SCRIPT_PATH auto $m >> /dev/null 2>&1") | crontab -
+                echo -e "${GREEN}已添加: 每天 $h 点运行。${NC}"; sleep 2
+                ;;
+            2)
+                read -p "请输入每天消耗流量 (MB): " m
+                echo -e "${PURPLE}[随机模式] 脚本将在每天 00:00 启动，随机等待 0~18 小时后开始跑流量。${NC}"
+                # 随机逻辑: sleep 0 ~ 65534秒 (约18小时)
+                # 注意: RANDOM 是 0-32767，两个 RANDOM 相加大约可达 18小时
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
+                (crontab -l 2>/dev/null; echo "0 0 * * * sleep \$((RANDOM + RANDOM)) && /bin/bash $SCRIPT_PATH auto $m >> /dev/null 2>&1") | crontab -
+                echo -e "${GREEN}已添加: 每天 0点启动并随机延迟执行。${NC}"; sleep 3
+                ;;
+            3)
+                crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
+                echo -e "${GREEN}已删除本脚本所有任务。${NC}"; sleep 1
+                ;;
+            4)
+                echo -e "${CYAN}当前 Crontab 列表:${NC}"
+                crontab -l | grep "$SCRIPT_PATH" || echo "无任务"
+                read -p "按回车继续..."
+                ;;
+            0) return ;;
+        esac
+    done
+}
 
 show_dashboard() {
     load_config
@@ -285,7 +313,7 @@ settings_menu() {
         echo -e "3. IP 协议偏好"
         echo -e "4. 智能补课模式"
         echo -e "5. 随机流量波动"
-        echo -e "6. ${CYAN}添加自定义下载链接${NC} (NEW!)"
+        echo -e "6. ${CYAN}添加自定义下载链接${NC}"
         echo -e "7. 清空自定义链接"
         echo -e "8. 安装 vnstat | 9. 重置统计 | 10. 卸载"
         echo -e "0. 返回"
@@ -316,7 +344,7 @@ main_menu() {
     while true; do
         clear; show_dashboard 
         echo -e " 1. ${GREEN}立即运行${NC} (手动)"
-        echo -e " 2. ${YELLOW}定时任务${NC} (自动)"
+        echo -e " 2. ${YELLOW}定时任务${NC} (管理计划)" # [修改]
         echo -e " 3. ${PURPLE}高级设置${NC} (链接/配置/卸载)"
         echo -e " 4. ${RED}停止运行${NC} (Kill All)"
         echo -e " 5. ${BLUE}检查更新${NC}"
@@ -325,12 +353,7 @@ main_menu() {
         read -p "请输入选项: " choice
         case $choice in
             1) read -p "输入流量(MB): " mb; run_traffic "$mb" "manual"; read -p "按回车..." ;;
-            2) 
-               echo "1.添加 2.删除 3.查看"; read -p "选: " c
-               if [ "$c" == "1" ]; then read -p "MB: " m; read -p "StartHour: " h; 
-                  (crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH"; echo "0 $h * * * /bin/bash $SCRIPT_PATH auto $m >> /dev/null 2>&1") | crontab -; echo "已加"; sleep 1; fi
-               if [ "$c" == "2" ]; then crontab -l | grep -v "$SCRIPT_PATH" | crontab -; echo "已删"; sleep 1; fi
-               if [ "$c" == "3" ]; then crontab -l | grep "$SCRIPT_PATH"; read -p "按回车..."; fi ;;
+            2) cron_menu ;; # [修改] 进入子菜单
             3) settings_menu ;;
             4) kill_all_tasks ;;
             5) check_update; read -p "按回车..." ;;
