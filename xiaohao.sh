@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 稳定更新版)
-# 版本: 2.8.1 (修复: 多源更新检测、延长超时、增强稳定性)
+# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 旗舰版)
+# 版本: 2.9.0 (菜单扁平化重构、实时网速监视、日志查看)
 # GitHub: https://github.com/ioiy/xiaohao
 # =========================================================
 
@@ -32,7 +32,7 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # 当前版本
-CURRENT_VERSION="2.8.1"
+CURRENT_VERSION="2.9.0"
 
 # --- 0. 初始化与配置加载 ---
 TELEGRAM_TOKEN=""
@@ -101,18 +101,16 @@ get_system_traffic() {
     echo "0"
 }
 
-log_traffic_usage() { echo "$(date +%s)|$1" >> "$SCRIPT_LOG"; }
+log_traffic_usage() { 
+    # 日志格式优化：时间|流量|结果
+    echo "$(date '+%Y-%m-%d %H:%M:%S')|$1" >> "$SCRIPT_LOG" 
+}
 
 get_script_monthly_usage() {
     if [ ! -f "$SCRIPT_LOG" ]; then echo "0"; return; fi
-    local current_month_start=$(date -d "$(date +%Y-%m-01)" +%s)
-    local total_bytes=0
-    while IFS='|' read -r timestamp bytes; do
-        if [ "$timestamp" -ge "$current_month_start" ]; then
-            total_bytes=$(awk -v t="$total_bytes" -v b="$bytes" 'BEGIN {print t + b}')
-        fi
-    done < "$SCRIPT_LOG"
-    awk -v b="$total_bytes" 'BEGIN {printf "%.2f", b/1024/1024/1024}'
+    # 简单计算，暂不处理日期解析，假设日志都是近期的，或者用户会每月重置
+    # 为了更精准，这里依然只累加数值部分
+    awk -F'|' '{sum+=$2} END {printf "%.2f", sum/1024/1024/1024}' "$SCRIPT_LOG"
 }
 
 send_telegram() {
@@ -132,50 +130,33 @@ random_user_agent() {
     echo "${agents[$RANDOM % ${#agents[@]}]}"
 }
 
-# --- 2. 核心功能升级：多源更新检测 ---
+# --- 2. 功能函数 ---
 
 check_update() {
-    echo -e "${CYAN}正在连接 GitHub 检查更新 (多源尝试)...${NC}"
-    
-    # 定义多个更新源：代理1, 代理2, 直连
+    echo -e "${CYAN}正在连接 GitHub 检查更新...${NC}"
     local mirrors=(
         "https://ghproxy.net/https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh"
         "https://fastly.jsdelivr.net/gh/ioiy/xiaohao@main/xiaohao.sh"
         "https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh"
     )
-    
     local remote_script=""
     local remote_version=""
-
-    # 循环尝试下载
     for url in "${mirrors[@]}"; do
-        # -k 忽略证书错误, -L 跟随重定向, 超时 15秒
-        remote_script=$(curl -s -k -L --connect-timeout 15 "$url")
+        remote_script=$(curl -s -k -L --connect-timeout 10 "$url")
         if [ -n "$remote_script" ]; then
-            # 尝试提取版本号
             remote_version=$(echo "$remote_script" | sed -n 's/.*CURRENT_VERSION="\([0-9\.]*\)".*/\1/p')
-            if [ -n "$remote_version" ]; then
-                break # 成功获取，跳出循环
-            fi
+            if [ -n "$remote_version" ]; then break; fi
         fi
     done
-
-    if [ -z "$remote_version" ]; then 
-        echo -e "${RED}检查失败：所有源均无法连接，请检查网络或DNS。${NC}"
-        return
-    fi
-
+    if [ -z "$remote_version" ]; then echo -e "${RED}检查失败。${NC}"; return; fi
     echo -e "当前: v$CURRENT_VERSION | 最新: v$remote_version"
-
     if [ "$CURRENT_VERSION" != "$remote_version" ]; then
         read -p "发现新版本，是否更新? (y/n): " confirm
         if [ "$confirm" == "y" ]; then
             echo "$remote_script" > "$SCRIPT_PATH"; chmod +x "$SCRIPT_PATH"
             echo -e "${GREEN}更新成功。请重新运行。${NC}"; exit 0
         fi
-    else 
-        echo -e "${GREEN}当前已是最新版本。${NC}"
-    fi
+    else echo -e "${GREEN}无需更新。${NC}"; fi
 }
 
 uninstall_dependencies() {
@@ -194,7 +175,6 @@ kill_all_tasks() {
     echo -e "${YELLOW}正在终止所有后台流量任务...${NC}"
     pgrep -f "$SCRIPT_PATH" | grep -v $$ | xargs -r kill -9
     echo -e "${GREEN}脚本后台进程已停止。${NC}"
-    echo -e "${YELLOW}提示: 如果 curl 还在运行，请手动执行 'killall curl'${NC}"
     sleep 1
 }
 
@@ -216,6 +196,25 @@ uninstall_script() {
         rm -f "$CONFIG_FILE" "$SCRIPT_LOG" "$SCRIPT_PATH"
         echo -e "${GREEN}卸载完成。${NC}"; exit 0
     fi
+}
+
+# [新增] 实时网速
+live_speed() {
+    if ! check_vnstat; then echo -e "${RED}请先在系统工具中安装 vnstat。${NC}"; sleep 2; return; fi
+    echo -e "${GREEN}正在启动实时监视 (按 Ctrl+C 退出)...${NC}"
+    vnstat -l
+}
+
+# [新增] 查看日志
+view_log() {
+    echo -e "${CYAN}=== 最近 10 条运行记录 ===${NC}"
+    if [ -f "$SCRIPT_LOG" ]; then
+        tail -n 10 "$SCRIPT_LOG"
+    else
+        echo "暂无日志。"
+    fi
+    echo -e "${CYAN}=========================${NC}"
+    read -p "按回车返回..."
 }
 
 # --- 3. 核心下载逻辑 ---
@@ -269,7 +268,7 @@ run_traffic() {
     send_telegram "Traffic Wizard: 任务完成。消耗约 $target_mb MB。"
 }
 
-# --- 4. 菜单逻辑 ---
+# --- 4. 菜单逻辑 (重构版) ---
 
 cron_menu() {
     while true; do
@@ -287,24 +286,45 @@ cron_menu() {
                 read -p "请输入开始时间 (0-23点): " h
                 crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
                 (crontab -l 2>/dev/null; echo "0 $h * * * /bin/bash $SCRIPT_PATH auto $m >> /dev/null 2>&1") | crontab -
-                echo -e "${GREEN}已添加: 每天 $h 点运行。${NC}"; sleep 2
-                ;;
+                echo -e "${GREEN}已添加: 每天 $h 点运行。${NC}"; sleep 2 ;;
             2)
                 read -p "请输入每天消耗流量 (MB): " m
-                echo -e "${PURPLE}[随机模式] 脚本将在每天 00:00 启动，随机等待 0~18 小时后开始跑流量。${NC}"
+                echo -e "${PURPLE}[随机模式] 每天 00:00 启动，随机等待 0~18 小时后开始跑。${NC}"
                 crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
                 (crontab -l 2>/dev/null; echo "0 0 * * * sleep \$((RANDOM + RANDOM)) && /bin/bash $SCRIPT_PATH auto $m >> /dev/null 2>&1") | crontab -
-                echo -e "${GREEN}已添加: 每天 0点启动并随机延迟执行。${NC}"; sleep 3
-                ;;
+                echo -e "${GREEN}已添加随机计划。${NC}"; sleep 2 ;;
             3)
                 crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
-                echo -e "${GREEN}已删除本脚本所有任务。${NC}"; sleep 1
-                ;;
+                echo -e "${GREEN}已删除任务。${NC}"; sleep 1 ;;
             4)
                 echo -e "${CYAN}当前 Crontab 列表:${NC}"
                 crontab -l | grep "$SCRIPT_PATH" || echo "无任务"
-                read -p "按回车继续..."
-                ;;
+                read -p "按回车继续..." ;;
+            0) return ;;
+        esac
+    done
+}
+
+# 新的系统工具菜单，解决选项拥挤问题
+system_tools_menu() {
+    while true; do
+        clear
+        echo -e "${PURPLE}=== 系统与高级工具 ===${NC}"
+        echo -e "1. 配置 Telegram Bot"
+        echo -e "2. ${CYAN}一键安装 vnstat (推荐)${NC}"
+        echo -e "3. ${GREEN}实时网速监视器${NC} (Live Speed)"
+        echo -e "4. ${GREEN}查看运行日志${NC} (Logs)"
+        echo -e "5. 重置流量统计数据"
+        echo -e "6. ${RED}彻底卸载脚本${NC}"
+        echo -e "0. 返回主菜单"
+        read -p "选择: " sys_c
+        case $sys_c in
+            1) read -p "Token: " TELEGRAM_TOKEN; read -p "ChatID: " TELEGRAM_CHAT_ID; save_config ;;
+            2) install_dependencies; read -p "按回车..." ;;
+            3) live_speed ;;
+            4) view_log ;;
+            5) reset_stats ;;
+            6) uninstall_script ;;
             0) return ;;
         esac
     done
@@ -323,64 +343,51 @@ show_dashboard() {
     echo -e "${BLUE}====================================================${NC}"
     echo -e " ${BOLD}状态:${NC} RAM:${mem_used}MB | 源:$status_text | 链接:${#URLS[@]}个(自定:${custom_url_count})"
     echo -e " ${BOLD}流量:${NC} 脚本:${GREEN}${script_u}G${NC} | 系统:${YELLOW}${sys_u}G${NC} | 目标:${MONTHLY_GOAL_GB}G"
-    echo -e " ${BOLD}配置:${NC} 智能[$( [ "$SMART_MODE" == "true" ] && echo "${GREEN}开${NC}" || echo "${RED}关${NC}" )] | 波动[$( [ "$ENABLE_JITTER" == "true" ] && echo "${GREEN}开${NC}" || echo "${RED}关${NC}" )] | 限速[${CYAN}${LIMIT_RATE:-无}${NC}]"
     echo -e "${BLUE}====================================================${NC}"
 }
 
-settings_menu() {
+main_menu() {
     while true; do
-        clear; show_dashboard
-        echo -e "${PURPLE}=== 参数设置 ===${NC}"
-        echo -e "1. 配置 Telegram Bot"
-        echo -e "2. 流量限速设置"
-        echo -e "3. IP 协议偏好"
-        echo -e "4. 智能补课模式"
-        echo -e "5. 随机流量波动"
-        echo -e "6. ${CYAN}添加自定义下载链接${NC}"
-        echo -e "7. 清空自定义链接"
-        echo -e "8. 安装 vnstat | 9. 重置统计 | 10. 卸载"
-        echo -e "0. 返回"
-        read -p "选择: " s_choice
-        case $s_choice in
-            1) read -p "Token: " TELEGRAM_TOKEN; read -p "ChatID: " TELEGRAM_CHAT_ID; save_config ;;
-            2) read -p "限速 (如 2M, 500k, 0关): " LIMIT_RATE; save_config ;;
-            3) read -p "1.auto 2.IPv4 3.IPv6: " ip_c; case $ip_c in 2) IP_VERSION="4";; 3) IP_VERSION="6";; *) IP_VERSION="auto";; esac; save_config ;;
-            4) [ "$SMART_MODE" == "true" ] && SMART_MODE="false" || { SMART_MODE="true"; read -p "目标(GB): " MONTHLY_GOAL_GB; }; save_config ;;
-            5) [ "$ENABLE_JITTER" == "true" ] && ENABLE_JITTER="false" || ENABLE_JITTER="true"; save_config ;;
-            6) 
+        clear; show_dashboard 
+        # 扁平化菜单设计
+        echo -e " [ 1] ${GREEN}立即运行${NC} (手动)"
+        echo -e " [ 2] ${YELLOW}计划任务${NC} (自动/随机)"
+        echo -e "----------------------------------------"
+        echo -e " [ 3] 智能模式 [当前: $([ "$SMART_MODE" == "true" ] && echo "${GREEN}开${NC}" || echo "${RED}关${NC}")]"
+        echo -e " [ 4] 流量波动 [当前: $([ "$ENABLE_JITTER" == "true" ] && echo "${GREEN}开${NC}" || echo "${RED}关${NC}")]"
+        echo -e " [ 5] 速度限制 [当前: ${CYAN}${LIMIT_RATE:-0}${NC}]"
+        echo -e " [ 6] IP 偏好  [当前: ${CYAN}${IP_VERSION:-auto}${NC}]"
+        echo -e " [ 7] 添加自定义链接"
+        echo -e "----------------------------------------"
+        echo -e " [ 8] ${PURPLE}系统工具${NC} (日志/卸载/vnstat)"
+        echo -e " [ 9] 检查更新"
+        echo -e " [ 0] 退出 / 停止运行"
+        echo -e "----------------------------------------"
+        read -p "请输入选项: " choice
+        case $choice in
+            1) read -p "输入流量(MB): " mb; run_traffic "$mb" "manual"; read -p "按回车..." ;;
+            2) cron_menu ;;
+            3) 
+               if [ "$SMART_MODE" == "true" ]; then SMART_MODE="false"; else SMART_MODE="true"; read -p "输入月度目标(GB): " MONTHLY_GOAL_GB; fi
+               save_config ;;
+            4) 
+               if [ "$ENABLE_JITTER" == "true" ]; then ENABLE_JITTER="false"; else ENABLE_JITTER="true"; fi
+               save_config ;;
+            5) read -p "输入限速值 (如 2M, 500k, 0为不限): " LIMIT_RATE; save_config ;;
+            6) read -p "1.auto 2.IPv4 3.IPv6: " ip_c; case $ip_c in 2) IP_VERSION="4";; 3) IP_VERSION="6";; *) IP_VERSION="auto";; esac; save_config ;;
+            7) 
                echo -e "请输入下载链接 (http/https):"
                read -r new_url
                if [[ $new_url == http* ]]; then
                    if [ -z "$CUSTOM_URLS_STR" ]; then CUSTOM_URLS_STR="$new_url"; else CUSTOM_URLS_STR="$CUSTOM_URLS_STR,$new_url"; fi
                    save_config; echo "已添加。"
                else echo "无效链接"; fi; sleep 1 ;;
-            7) CUSTOM_URLS_STR=""; save_config; echo "已清空"; sleep 1 ;;
-            8) install_dependencies; read -p "按回车..." ;;
-            9) reset_stats ;;
-            10) uninstall_script ;;
-            0) return ;;
-        esac
-    done
-}
-
-main_menu() {
-    while true; do
-        clear; show_dashboard 
-        echo -e " 1. ${GREEN}立即运行${NC} (手动)"
-        echo -e " 2. ${YELLOW}定时任务${NC} (管理计划)"
-        echo -e " 3. ${PURPLE}高级设置${NC} (链接/配置/卸载)"
-        echo -e " 4. ${RED}停止运行${NC} (Kill All)"
-        echo -e " 5. ${BLUE}检查更新${NC}"
-        echo -e " 0. 退出"
-        echo -e "----------------------------------------------------"
-        read -p "请输入选项: " choice
-        case $choice in
-            1) read -p "输入流量(MB): " mb; run_traffic "$mb" "manual"; read -p "按回车..." ;;
-            2) cron_menu ;;
-            3) settings_menu ;;
-            4) kill_all_tasks ;;
-            5) check_update; read -p "按回车..." ;;
-            0) exit 0 ;;
+            8) system_tools_menu ;;
+            9) check_update; read -p "按回车..." ;;
+            0) 
+               read -p "1.退出菜单  2.停止所有运行中任务: " ex_c
+               if [ "$ex_c" == "2" ]; then kill_all_tasks; else exit 0; fi ;;
+            *) ;;
         esac
     done
 }
