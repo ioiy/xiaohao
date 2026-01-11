@@ -7,7 +7,7 @@
 # =========================================================
 
 # 当前脚本版本
-CURRENT_VERSION="2.0.0"
+CURRENT_VERSION="1.3.0"
 
 # --- 全局配置与文件路径 ---
 CONFIG_FILE="$HOME/.traffic_wizard.conf"
