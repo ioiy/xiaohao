@@ -2,7 +2,8 @@
 
 # =========================================================
 # 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 完美内核版)
-# 版本: 2.5.0 (新增: 无依赖流量统计模式、自动网卡识别)
+# 版本: 2.6.0 (新增: vnstat卸载、手动更新确认)
+# GitHub: https://github.com/ioiy/xiaohao
 # =========================================================
 
 # --- 全局配置 ---
@@ -31,7 +32,7 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # 当前版本
-CURRENT_VERSION="2.5.0"
+CURRENT_VERSION="2.6.0"
 
 # --- 0. 初始化与配置加载 ---
 TELEGRAM_TOKEN=""
@@ -63,20 +64,16 @@ EOF
 
 check_vnstat() { if ! command -v vnstat &> /dev/null; then return 1; else return 0; fi; }
 
-# [新增] 获取主要网卡名称
 get_main_interface() {
-    # 尝试通过 ip route 获取默认网卡
     local iface=$(ip route get 8.8.8.8 2>/dev/null | awk '{print $5; exit}')
-    # 如果失败，尝试读取 /proc/net/dev 第一行非 lo 的网卡
     if [ -z "$iface" ]; then
         iface=$(cat /proc/net/dev | grep -v 'lo:' | head -n 1 | awk -F: '{print $1}' | sed 's/ //g')
     fi
     echo "$iface"
 }
 
-# [核心升级] 获取系统流量 (双模)
 get_system_traffic() {
-    # 模式1: 优先使用 vnstat (如果有) -> 数据最准，重启还在
+    # 优先 vnstat
     if check_vnstat; then
         local traffic_output
         traffic_output=$(vnstat -m --oneline 2>/dev/null | awk -F';' '{print $11}') 
@@ -86,33 +83,21 @@ get_system_traffic() {
         fi
     fi
 
-    # 模式2: 内核直接读取 (无依赖) -> 读取 /proc/net/dev
+    # 降级: 内核读取
     local iface=$(get_main_interface)
     if [ -n "$iface" ]; then
-        # 读取接收(RX)和发送(TX)字节
         local line=$(grep "$iface" /proc/net/dev)
         if [ -n "$line" ]; then
-            # 这里需要处理不同格式，通常第2列是RX bytes，第10列是TX bytes
-            # 注意: Alpine/Busybox 的 awk 处理可能需要小心空格
             local rx=$(echo "$line" | awk '{print $2}')
             local tx=$(echo "$line" | awk '{print $10}')
-            # 某些系统可能因为列对齐问题导致 $10 不对，简单处理：总和
-            # 如果 $1 包含了 interface名字 (如 eth0:1234)，则 $2 是 RX
-            # 如果 $1 是 interface: (如 eth0:)，则 $2 是 RX
-            # 我们直接提取整行数字
-            
-            # 简单算法：计算总字节
             local total_bytes=$(awk -v r="$rx" -v t="$tx" 'BEGIN {print r + t}')
-            # 转换为 GB
             awk -v b="$total_bytes" 'BEGIN {printf "%.2f", b/1024/1024/1024}'
             return
         fi
     fi
-    
     echo "0"
 }
 
-# 检查负载
 check_load() {
     local load=$(cat /proc/loadavg | awk '{print $1}')
     local is_high=$(echo "$load > 2.0" | bc -l 2>/dev/null || awk -v l="$load" 'BEGIN {print (l>2.0)}')
@@ -150,26 +135,63 @@ random_user_agent() {
     echo "${agents[$RANDOM % ${#agents[@]}]}"
 }
 
+# --- 2. 核心功能升级区 ---
+
+# [升级] 检查更新 (手动选择模式)
 check_update() {
     echo -e "${CYAN}正在连接 GitHub 检查更新...${NC}"
-    local remote_url="https://ghproxy.com/https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh"
-    local remote_script=$(curl -s --connect-timeout 5 "$remote_url")
-    if [ -z "$remote_script" ]; then remote_script=$(curl -s --connect-timeout 5 "https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh"); fi
+    local remote_url="https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh"
+    # 增加加速源备用
+    local remote_script=$(curl -s --connect-timeout 5 "https://ghproxy.com/$remote_url")
+    if [ -z "$remote_script" ]; then
+        remote_script=$(curl -s --connect-timeout 5 "$remote_url")
+    fi
+
     local remote_version=$(echo "$remote_script" | sed -n 's/.*CURRENT_VERSION="\([0-9\.]*\)".*/\1/p')
 
     if [ -z "$remote_version" ]; then
-        echo -e "${RED}检查失败：无法连接 GitHub。${NC}"; return
+        echo -e "${RED}检查失败：无法获取版本信息。${NC}"
+        return
     fi
-    if [[ "$CURRENT_VERSION" > "$remote_version" ]]; then
-        echo -e "${GREEN}您使用的是本地定制增强版 (Ultimate)，无需更新。${NC}"
-    elif [ "$CURRENT_VERSION" == "$remote_version" ]; then
-        echo -e "${GREEN}当前已是最新版本。${NC}"
+
+    echo -e "当前版本: v$CURRENT_VERSION"
+    echo -e "最新版本: v$remote_version"
+
+    if [ "$CURRENT_VERSION" != "$remote_version" ]; then
+        echo -e "${YELLOW}发现新版本！${NC}"
+        read -p "是否立即更新并覆盖当前脚本? (y/n): " confirm
+        if [ "$confirm" == "y" ]; then
+            echo "$remote_script" > "$SCRIPT_PATH"
+            chmod +x "$SCRIPT_PATH"
+            echo -e "${GREEN}更新成功！请重新运行脚本。${NC}"
+            exit 0
+        else
+            echo -e "已取消更新。"
+        fi
     else
-        echo -e "${YELLOW}发现远程有新版本，但建议保留当前增强版。${NC}"
+        echo -e "${GREEN}当前已是最新版本。${NC}"
     fi
 }
 
-# --- 2. 辅助功能 ---
+# [新增] 卸载依赖 (vnstat)
+uninstall_dependencies() {
+    if check_vnstat; then
+        echo -e "${YELLOW}检测到系统安装了 vnstat。${NC}"
+        read -p "是否同时卸载 vnstat? (y/n): " rm_vn
+        if [ "$rm_vn" == "y" ]; then
+            echo -e "${CYAN}正在卸载 vnstat...${NC}"
+            if [ -f /etc/alpine-release ]; then
+                apk del vnstat
+            elif [ -f /etc/debian_version ]; then
+                apt-get purge -y vnstat
+                apt-get autoremove -y
+            fi
+            echo -e "${GREEN}vnstat 已卸载。${NC}"
+        fi
+    fi
+}
+
+# --- 3. 辅助功能 ---
 
 install_dependencies() {
     echo -e "${CYAN}正在检测并安装依赖 (vnstat, curl, cron)...${NC}"
@@ -196,18 +218,24 @@ reset_stats() {
     sleep 1
 }
 
+# [升级] 卸载脚本 (集成依赖卸载)
 uninstall_script() {
-    echo -e "${RED}${BOLD}警告：即将删除所有文件和任务！${NC}"
-    read -p "确定吗？(y/n): " confirm
+    echo -e "${RED}${BOLD}警告：即将删除脚本、配置、日志及定时任务！${NC}"
+    read -p "确定要继续卸载吗？(y/n): " confirm
     if [ "$confirm" == "y" ]; then
+        # 询问卸载 vnstat
+        uninstall_dependencies
+        
+        # 删除任务和文件
         crontab -l 2>/dev/null | grep -v "$SCRIPT_PATH" | crontab -
         rm -f "$CONFIG_FILE" "$SCRIPT_LOG" "$SCRIPT_PATH"
-        echo -e "${GREEN}已卸载。${NC}"
+        
+        echo -e "${GREEN}脚本及其数据已彻底清除。再见！${NC}"
         exit 0
     fi
 }
 
-# --- 3. 核心下载逻辑 ---
+# --- 4. 核心下载逻辑 ---
 run_traffic() {
     load_config
     local target_mb=$1
@@ -267,19 +295,16 @@ run_traffic() {
     send_telegram "Traffic Wizard: 任务完成。本次脚本消耗约 $target_mb MB。"
 }
 
-# --- 4. 仪表盘与菜单 ---
+# --- 5. 仪表盘与菜单 ---
 
 show_dashboard() {
     load_config
     local mem_total=$(free -m | awk 'NR==2{print $2}')
     local mem_used=$(free -m | awk 'NR==2{print $3}')
     local load_avg=$(cat /proc/loadavg | awk '{print $1" "$2" "$3}')
-    local disk_used=$(df -h / | awk 'NR==2{print $5}')
-    local uptime_day=$(uptime -p | sed 's/up //')
     local script_u=$(get_script_monthly_usage)
     local sys_u=$(get_system_traffic)
     
-    # 状态判断
     local status_text=""
     if check_vnstat; then status_text="${GREEN}vnstat(精准)${NC}"; 
     else status_text="${YELLOW}内核读取(重启清零)${NC}"; fi
@@ -315,7 +340,8 @@ settings_menu() {
         echo -e "4. 智能补课模式"
         echo -e "5. 随机流量波动 [$( [ "$ENABLE_JITTER" == "true" ] && echo "${GREEN}开启${NC}" || echo "${RED}关闭${NC}" )]"
         echo -e "6. ${CYAN}一键安装 vnstat (推荐)${NC}"
-        echo -e "7. 重置统计 / 8. 卸载"
+        echo -e "7. 重置统计"
+        echo -e "8. ${RED}完全卸载 (含vnstat)${NC}"
         echo -e "0. 返回"
         read -p "选择: " s_choice
         case $s_choice in
