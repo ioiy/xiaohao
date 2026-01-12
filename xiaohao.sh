@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 完美交互版)
-# 版本: 2.9.2 (主菜单净化、停止功能归档、更新检测修复)
+# 脚本名称: Traffic Wizard Ultimate (流量保号助手 - 易读日志版)
+# 版本: 2.9.3 (优化: 日志查看器自动换算MB、界面微调)
 # GitHub: https://github.com/ioiy/xiaohao
 # =========================================================
 
@@ -32,7 +32,7 @@ NC='\033[0m'
 BOLD='\033[1m'
 
 # 当前版本
-CURRENT_VERSION="2.9.2"
+CURRENT_VERSION="2.9.3"
 
 # --- 0. 初始化与配置加载 ---
 TELEGRAM_TOKEN=""
@@ -129,10 +129,9 @@ random_user_agent() {
 
 # --- 2. 功能函数 ---
 
-# [修复] 增加防缓存机制的更新检测
 check_update() {
     echo -e "${CYAN}正在连接 GitHub 检查更新...${NC}"
-    local timestamp=$(date +%s) # 时间戳防止CDN缓存
+    local timestamp=$(date +%s) 
     local mirrors=(
         "https://ghproxy.net/https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh?t=$timestamp"
         "https://fastly.jsdelivr.net/gh/ioiy/xiaohao@main/xiaohao.sh?t=$timestamp"
@@ -147,27 +146,16 @@ check_update() {
             if [ -n "$remote_version" ]; then break; fi
         fi
     done
-    
-    if [ -z "$remote_version" ]; then 
-        echo -e "${RED}检查失败：无法连接服务器。${NC}"
-        return
-    fi
-    
+    if [ -z "$remote_version" ]; then echo -e "${RED}检查失败：无法连接服务器。${NC}"; return; fi
     echo -e "当前: v$CURRENT_VERSION | 最新: v$remote_version"
-    
     if [ "$CURRENT_VERSION" != "$remote_version" ]; then
         echo -e "${YELLOW}发现新版本！${NC}"
         read -p "是否更新? (y/n): " confirm
         if [ "$confirm" == "y" ]; then
-            # 移除可能存在的URL参数内容，纯净覆盖
-            # 注意：curl 获取的内容本身不含参数，直接覆盖即可
-            echo "$remote_script" > "$SCRIPT_PATH"
-            chmod +x "$SCRIPT_PATH"
+            echo "$remote_script" > "$SCRIPT_PATH"; chmod +x "$SCRIPT_PATH"
             echo -e "${GREEN}更新成功。请重新运行。${NC}"; exit 0
         fi
-    else 
-        echo -e "${GREEN}无需更新。${NC}"
-    fi
+    else echo -e "${GREEN}无需更新。${NC}"; fi
 }
 
 uninstall_dependencies() {
@@ -215,10 +203,17 @@ live_speed() {
     vnstat -l
 }
 
+# [优化] 日志查看器 (增加翻译逻辑)
 view_log() {
     echo -e "${CYAN}=== 最近 10 条运行记录 ===${NC}"
+    echo -e "${YELLOW} 时间                | 状态        | 流量 ${NC}"
+    echo -e "------------------------------------------------"
     if [ -f "$SCRIPT_LOG" ]; then
-        tail -n 10 "$SCRIPT_LOG"
+        # 使用 awk 格式化输出：将 Bytes 转换为 MB，并添加对齐
+        tail -n 10 "$SCRIPT_LOG" | awk -F'|' '{
+            mb = $2 / 1024 / 1024;
+            printf "%s | %s   | %.2f MB\n", $1, "✅ 成功", mb
+        }'
     else
         echo "暂无日志。"
     fi
@@ -277,7 +272,7 @@ run_traffic() {
     send_telegram "Traffic Wizard: 任务完成。消耗约 $target_mb MB。"
 }
 
-# --- 4. 菜单逻辑 (最终版) ---
+# --- 4. 菜单逻辑 ---
 
 cron_menu() {
     while true; do
