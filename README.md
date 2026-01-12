@@ -29,4 +29,74 @@
 推荐使用 `root` 用户运行：
 
 ```bash
-curl -sS -O [https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh](https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh) && chmod +x xiaohao.sh && ./xiaohao.sh
+curl -sS -O https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh && chmod +x xiaohao.sh && ./xiaohao.sh
+```
+
+## 如果服务器在国内或连接 GitHub 困难，请使用加速源：
+
+```bash
+curl -sS -O https://ghproxy.net/https://raw.githubusercontent.com/ioiy/xiaohao/main/xiaohao.sh && chmod +x xiaohao.sh && ./xiaohao.sh
+```
+
+🎮 菜单功能说明
+脚本采用了全新的交互逻辑：
+
+🚀 主功能区
+[1] 立即运行：手动输入流量数值（MB），立即执行下载任务。
+
+[2] 计划任务：
+
+固定时间：例如“每天凌晨 3 点跑 500MB”。
+
+随机时间：每天 0 点启动，随机沉睡 0~18 小时后开始跑，极致保号。
+
+任务可视化：菜单顶部会自动翻译并显示当前已设定的任务。
+
+🎛️ 快捷开关 (点击即修改)
+[3] 智能模式：开启后，超过月度目标（默认10GB）自动停止脚本。
+
+[4] 流量波动：开启后，实际跑的流量会随机增减 10%。
+
+[5] 速度限制：设置 curl 最大下载速度（如 2M），模拟看视频。
+
+[6] IP 偏好：强制 IPv4 / IPv6 或自动。
+
+[7] 自定义链接：添加你自己的下载源。
+
+🛠️ 系统工具 (选项 8)
+进入二级菜单后可使用：
+
+配置 Telegram Bot：设置消息推送。
+
+一键安装 vnstat：推荐安装，获得精准统计。
+
+实时网速监视：查看当前网卡吞吐量。
+
+查看运行日志：查看最近 10 条运行记录（已自动格式化）。
+
+停止当前运行：紧急停止所有正在后台运行的脚本进程。
+
+彻底卸载：清理所有文件和任务。
+
+⚙️ 配置文件
+脚本会自动在用户目录下生成隐藏配置文件，升级脚本不会丢失配置：
+
+配置文件：~/.traffic_wizard.conf
+
+运行日志：~/.traffic_wizard.log
+
+📋 常见问题
+Q: 更新后检测不到新版本？ A: v2.9.2+ 版本已修复此问题，引入了时间戳防缓存机制。旧版本用户请等待 CDN 缓存刷新（约 10 分钟）或手动重新下载脚本。
+
+Q: 为什么日志里以前是数字，现在能看懂了？ A: v2.9.3 更新了日志查看器，它会自动读取日志文件中的字节数，并除以 1024/1024 换算成 MB 显示给用户。
+
+Q: 智能模式提示“未安装 vnstat”？ A: 智能模式依赖 vnstat 来获取重启后不丢失的总流量数据。请在“系统工具”中选择“一键安装 vnstat”。
+
+⚠️ 免责声明
+本脚本仅用于 VPS 流量消耗测试或保号目的。
+
+请勿在严禁跑流量的商家（如部分工单明确禁止的商家）上使用。
+
+作者不对使用本脚本产生的任何后果（如流量超额扣费、VPS 被封禁等）负责。
+
+Star ⭐ This Repository if it helps you!
