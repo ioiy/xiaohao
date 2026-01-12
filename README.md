@@ -39,9 +39,11 @@ curl -sS -O https://ghproxy.net/https://raw.githubusercontent.com/ioiy/xiaohao/m
 ```
 
 🎮 菜单功能说明
+
 脚本采用了全新的交互逻辑：
 
 🚀 主功能区
+
 [1] 立即运行：手动输入流量数值（MB），立即执行下载任务。
 
 [2] 计划任务：
@@ -53,6 +55,7 @@ curl -sS -O https://ghproxy.net/https://raw.githubusercontent.com/ioiy/xiaohao/m
 任务可视化：菜单顶部会自动翻译并显示当前已设定的任务。
 
 🎛️ 快捷开关 (点击即修改)
+
 [3] 智能模式：开启后，超过月度目标（默认10GB）自动停止脚本。
 
 [4] 流量波动：开启后，实际跑的流量会随机增减 10%。
@@ -64,6 +67,7 @@ curl -sS -O https://ghproxy.net/https://raw.githubusercontent.com/ioiy/xiaohao/m
 [7] 自定义链接：添加你自己的下载源。
 
 🛠️ 系统工具 (选项 8)
+
 进入二级菜单后可使用：
 
 配置 Telegram Bot：设置消息推送。
@@ -79,6 +83,7 @@ curl -sS -O https://ghproxy.net/https://raw.githubusercontent.com/ioiy/xiaohao/m
 彻底卸载：清理所有文件和任务。
 
 ⚙️ 配置文件
+
 脚本会自动在用户目录下生成隐藏配置文件，升级脚本不会丢失配置：
 
 配置文件：~/.traffic_wizard.conf
@@ -86,6 +91,7 @@ curl -sS -O https://ghproxy.net/https://raw.githubusercontent.com/ioiy/xiaohao/m
 运行日志：~/.traffic_wizard.log
 
 📋 常见问题
+
 Q: 更新后检测不到新版本？ A: v2.9.2+ 版本已修复此问题，引入了时间戳防缓存机制。旧版本用户请等待 CDN 缓存刷新（约 10 分钟）或手动重新下载脚本。
 
 Q: 为什么日志里以前是数字，现在能看懂了？ A: v2.9.3 更新了日志查看器，它会自动读取日志文件中的字节数，并除以 1024/1024 换算成 MB 显示给用户。
@@ -93,6 +99,7 @@ Q: 为什么日志里以前是数字，现在能看懂了？ A: v2.9.3 更新了
 Q: 智能模式提示“未安装 vnstat”？ A: 智能模式依赖 vnstat 来获取重启后不丢失的总流量数据。请在“系统工具”中选择“一键安装 vnstat”。
 
 ⚠️ 免责声明
+
 本脚本仅用于 VPS 流量消耗测试或保号目的。
 
 请勿在严禁跑流量的商家（如部分工单明确禁止的商家）上使用。
